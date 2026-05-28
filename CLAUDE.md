@@ -12,6 +12,9 @@ to BCBS 239, UK GDPR, and enterprise data governance standards.
 - Anthropic Claude API (claude-sonnet-4-6) with tool use and prompt caching
 - Pydantic v2 for schema validation
 - pandas for CSV profiling
+- Streamlit for the web UI
+- fpdf2 for PDF export
+- python-docx for Word export
 - Rich for CLI output
 - PyYAML for human-readable output
 
@@ -19,8 +22,10 @@ to BCBS 239, UK GDPR, and enterprise data governance standards.
 
 ```
 metadata-agent/
-├── demo.py                        # CLI entry point
+├── app.py                         # Streamlit web UI (primary entry point)
+├── demo.py                        # CLI entry point (alternative)
 ├── requirements.txt
+├── .streamlit/config.toml         # Streamlit theme (navy/blue banking palette)
 ├── samples/                       # Example inputs (CSV, JSON Schema, SQL DDL)
 │   ├── customer_accounts.csv
 │   ├── transaction_schema.json
@@ -40,6 +45,11 @@ metadata-agent/
     │   ├── __init__.py            # Guardrail pipeline
     │   ├── pii_guardrail.py       # PII sensitivity floor enforcement
     │   └── sensitivity_guardrail.py  # Dataset-level classification consistency
+    ├── exporters/                 # Download format generators
+    │   ├── __init__.py
+    │   ├── csv_exporter.py        # Flat CSV field inventory
+    │   ├── pdf_exporter.py        # Structured PDF document (fpdf2)
+    │   └── word_exporter.py       # Editable Word document (python-docx)
     └── evals/                     # Quality scoring (runs after guardrails)
         ├── __init__.py
         ├── eval_runner.py         # Orchestrates all 5 dimensions, computes weighted score
@@ -61,6 +71,10 @@ cp .env.example .env
 ## Running the agent
 
 ```bash
+# Web UI (recommended)
+streamlit run app.py
+
+# CLI (alternative)
 python demo.py samples/customer_accounts.csv
 python demo.py samples/transaction_schema.json
 python demo.py samples/risk_positions.sql

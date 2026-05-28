@@ -1,0 +1,767 @@
+"""
+Metadata Intelligence Agent — Streamlit Web Interface
+
+Run:  streamlit run app.py
+"""
+
+import io
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+import yaml
+
+# ── Page config (must be first Streamlit call) ─────────────────────────────
+st.set_page_config(
+    page_title="Metadata Intelligence Agent",
+    page_icon="🏦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={"Get help": None, "Report a bug": None, "About": None},
+)
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from src.agent import MetadataAgent
+from src.config import AgentConfig
+from src.exporters import export_csv, export_pdf, export_word
+from src.extractors import extract
+from src.schema import DatasetMetadata, QualityScore, SensitivityLevel
+
+# ── CSS ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+  /* Hide streamlit chrome */
+  #MainMenu, footer, header { visibility: hidden; }
+
+  /* Page background */
+  .stApp { background: #F8FAFC; }
+
+  /* Agent header */
+  .agent-header {
+    background: linear-gradient(135deg, #1E3A5F 0%, #2D5282 100%);
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    margin-bottom: 1.5rem;
+    color: white;
+  }
+  .agent-header h1 { color: white !important; margin: 0; font-size: 1.6rem; }
+  .agent-header p  { color: #CBD5E1 !important; margin: 0.25rem 0 0; font-size: 0.9rem; }
+
+  /* Sensitivity badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: white;
+    text-transform: uppercase;
+  }
+  .badge-public       { background: #2D9E47; }
+  .badge-internal     { background: #2E86AB; }
+  .badge-confidential { background: #F18F01; }
+  .badge-restricted   { background: #D13232; }
+  .badge-secret       { background: #8B0000; }
+
+  /* Stat cards */
+  .stat-card {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .stat-card .stat-value { font-size: 2rem; font-weight: 700; color: #1E3A5F; line-height: 1.1; }
+  .stat-card .stat-label { font-size: 0.75rem; color: #64748B; margin-top: 2px; }
+
+  /* Quality pill */
+  .quality-pass { color: #2D9E47; font-weight: 700; }
+  .quality-fail { color: #D13232; font-weight: 700; }
+
+  /* Upload zone enhancement */
+  .upload-card {
+    background: white;
+    border: 2px dashed #CBD5E1;
+    border-radius: 12px;
+    padding: 2.5rem;
+    text-align: center;
+  }
+
+  /* Field table row styling */
+  .pii-yes { color: #8B0000; font-weight: 600; }
+
+  /* Section label */
+  .section-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #64748B;
+    margin-bottom: 0.5rem;
+  }
+
+  /* Download section */
+  .download-section {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    margin-top: 1.5rem;
+  }
+
+  /* Metric overrides */
+  [data-testid="metric-container"] {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Constants ──────────────────────────────────────────────────────────────
+SENSITIVITY_COLORS = {
+    "public": "#2D9E47",
+    "internal": "#2E86AB",
+    "confidential": "#F18F01",
+    "restricted": "#D13232",
+    "secret": "#8B0000",
+}
+
+SAMPLE_FILES = {
+    "Customer Accounts (CSV)": "samples/customer_accounts.csv",
+    "Payment Transactions (JSON Schema)": "samples/transaction_schema.json",
+    "Risk Positions (SQL DDL)": "samples/risk_positions.sql",
+}
+
+MODELS = {
+    "Claude Sonnet 4.6 (Recommended)": "claude-sonnet-4-6",
+    "Claude Haiku 4.5 (Faster / cheaper)": "claude-haiku-4-5-20251001",
+    "Claude Opus 4.7 (Most capable)": "claude-opus-4-7",
+}
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+def badge(level: str) -> str:
+    return f'<span class="badge badge-{level}">{level}</span>'
+
+
+def quality_colour(score: float, passed: bool) -> str:
+    cls = "quality-pass" if passed else "quality-fail"
+    return f'<span class="{cls}">{score:.1f}/100 {"✓ PASS" if passed else "✗ FAIL"}</span>'
+
+
+def _ext(filename: str) -> str:
+    return Path(filename).suffix.lower().lstrip(".")
+
+
+def _api_key_set() -> bool:
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    return bool(key) and key != "your_api_key_here"
+
+
+@st.cache_data(show_spinner=False)
+def _extract_profile(file_bytes: bytes, filename: str):
+    """Cache the extraction step — it doesn't call the API."""
+    ext = Path(filename).suffix.lower()
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        return extract(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+
+# ── Session state init ──────────────────────────────────────────────────────
+for key, default in {
+    "metadata": None,
+    "profile": None,
+    "error": None,
+    "last_filename": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+# ── Sidebar ────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### Agent Settings")
+
+    api_key_input = st.text_input(
+        "Anthropic API Key",
+        value=os.environ.get("ANTHROPIC_API_KEY", ""),
+        type="password",
+        help="Get your key at console.anthropic.com. You can also set ANTHROPIC_API_KEY in a .env file.",
+    )
+    if api_key_input:
+        os.environ["ANTHROPIC_API_KEY"] = api_key_input
+
+    model_label = st.selectbox("Model", list(MODELS.keys()), index=0)
+    selected_model = MODELS[model_label]
+
+    st.divider()
+
+    if st.session_state.metadata:
+        md = st.session_state.metadata
+        qs = md.quality_score
+        st.markdown("### Last Run")
+        st.markdown(f"**{md.dataset_name}**")
+        st.markdown(f"Domain: `{md.data_domain.value}`")
+        st.markdown(
+            f"Classification: {badge(md.classification.value)}",
+            unsafe_allow_html=True,
+        )
+        st.markdown(f"Fields: **{len(md.fields)}**")
+        pii = sum(1 for f in md.fields if f.is_pii)
+        st.markdown(f"PII fields: **{pii}**")
+        if qs:
+            colour = "green" if qs.passed else "red"
+            st.markdown(
+                f"Quality: :{colour}[**{qs.overall_score:.0f}/100 {'PASS' if qs.passed else 'FAIL'}**]"
+            )
+        st.divider()
+        if st.button("Clear results / New file", use_container_width=True):
+            st.session_state.metadata = None
+            st.session_state.profile = None
+            st.session_state.last_filename = None
+            st.session_state.error = None
+            st.rerun()
+
+    st.markdown("### About")
+    st.markdown(
+        """
+Banking-grade metadata generation powered by Claude.
+
+**Supported inputs**
+- CSV datasets
+- JSON Schema (draft-07 / 2020-12)
+- SQL DDL (PostgreSQL, Oracle, SQL Server)
+
+**Standards applied**
+- BCBS 239 (risk data lineage)
+- UK GDPR / GDPR (PII classification)
+- DAMA-DMBOK (data stewardship)
+- FCA retention rules
+        """
+    )
+
+
+# ── Header ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="agent-header">
+  <h1>🏦 Metadata Intelligence Agent</h1>
+  <p>Generate banking-grade metadata from any dataset &mdash; BCBS 239 compliance,
+  PII guardrails, and 5-dimension quality evals in seconds.</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── Upload / sample section (shown when no metadata yet) ────────────────────
+if st.session_state.metadata is None:
+
+    # API key warning
+    if not _api_key_set():
+        st.warning(
+            "Set your **Anthropic API Key** in the sidebar to generate metadata. "
+            "You can still upload a file to preview its structure first.",
+            icon="🔑",
+        )
+
+    col_upload, col_sample = st.columns([3, 1], gap="large")
+
+    with col_upload:
+        st.markdown('<p class="section-label">Upload your dataset or schema</p>', unsafe_allow_html=True)
+        uploaded = st.file_uploader(
+            "Drag and drop or browse",
+            type=["csv", "json", "sql", "ddl"],
+            label_visibility="collapsed",
+            help="CSV datasets, JSON Schemas, or SQL DDL files up to 50 MB",
+        )
+
+    with col_sample:
+        st.markdown('<p class="section-label">Or try a sample</p>', unsafe_allow_html=True)
+        for label, path in SAMPLE_FILES.items():
+            if st.button(label, use_container_width=True, key=f"sample_{label}"):
+                with open(path, "rb") as f:
+                    uploaded = io.BytesIO(f.read())
+                    uploaded.name = Path(path).name
+
+    # ── File preview ───────────────────────────────────────────────────────
+    if uploaded:
+        filename = getattr(uploaded, "name", "uploaded_file")
+        file_bytes = uploaded.read() if hasattr(uploaded, "read") else uploaded.getvalue()
+
+        with st.spinner("Profiling dataset..."):
+            try:
+                profile = _extract_profile(file_bytes, filename)
+                st.session_state.profile = profile
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+                st.stop()
+
+        st.success(
+            f"**{profile.dataset_name}** — {len(profile.fields)} fields detected "
+            f"{'· ' + str(profile.row_count) + ' rows' if profile.row_count else ''}"
+        )
+
+        # Field preview table
+        pii_count = sum(1 for f in profile.fields if f.is_potential_pii)
+        if pii_count:
+            st.info(
+                f"**{pii_count} potential PII field(s)** detected by column-name heuristic "
+                f"(values masked). AI will confirm and classify each one.",
+                icon="🔍",
+            )
+
+        preview_df = pd.DataFrame([
+            {
+                "Field": f.name,
+                "Inferred Type": f.inferred_type,
+                "Null Rate": f"{f.null_rate:.0%}" if f.total_count > 0 else "—",
+                "Unique Values": f.unique_count if f.unique_count is not None else "—",
+                "Potential PII": "🔴" if f.is_potential_pii else "",
+            }
+            for f in profile.fields
+        ])
+        st.dataframe(
+            preview_df,
+            hide_index=True,
+            use_container_width=True,
+            height=min(400, 40 + len(profile.fields) * 36),
+        )
+
+        st.divider()
+
+        # Generate button
+        btn_disabled = not _api_key_set()
+        if st.button(
+            "Generate Metadata" + (" (API key required)" if btn_disabled else ""),
+            type="primary",
+            use_container_width=True,
+            disabled=btn_disabled,
+        ):
+            with st.spinner("Claude is analysing the dataset and generating metadata... (30–90 seconds)"):
+                try:
+                    config = AgentConfig(model=selected_model)
+                    agent = MetadataAgent(config)
+                    metadata, _ = agent.generate(profile)
+                    st.session_state.metadata = metadata
+                    st.session_state.last_filename = filename
+                    st.session_state.error = None
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.error = str(e)
+
+        if st.session_state.error:
+            st.error(f"Agent error: {st.session_state.error}")
+
+
+# ── Results section ─────────────────────────────────────────────────────────
+else:
+    md: DatasetMetadata = st.session_state.metadata
+    qs: QualityScore | None = md.quality_score
+    pii_fields = md.pii_fields
+
+    # ── Banner ─────────────────────────────────────────────────────────────
+    b1, b2, b3, b4, b5 = st.columns(5)
+    with b1:
+        st.markdown(
+            f'<div class="stat-card"><div class="stat-value">{len(md.fields)}</div>'
+            f'<div class="stat-label">Total Fields</div></div>',
+            unsafe_allow_html=True,
+        )
+    with b2:
+        st.markdown(
+            f'<div class="stat-card"><div class="stat-value">{len(pii_fields)}</div>'
+            f'<div class="stat-label">PII Fields</div></div>',
+            unsafe_allow_html=True,
+        )
+    with b3:
+        restricted = sum(
+            1 for f in md.fields if f.sensitivity_level.rank >= SensitivityLevel.RESTRICTED.rank
+        )
+        st.markdown(
+            f'<div class="stat-card"><div class="stat-value">{restricted}</div>'
+            f'<div class="stat-label">Restricted / Above</div></div>',
+            unsafe_allow_html=True,
+        )
+    with b4:
+        guardrails = len(qs.guardrails_applied) if qs else 0
+        st.markdown(
+            f'<div class="stat-card"><div class="stat-value">{guardrails}</div>'
+            f'<div class="stat-label">Guardrails Applied</div></div>',
+            unsafe_allow_html=True,
+        )
+    with b5:
+        if qs:
+            colour = "#2D9E47" if qs.passed else "#D13232"
+            label = "PASS" if qs.passed else "FAIL"
+            st.markdown(
+                f'<div class="stat-card">'
+                f'<div class="stat-value" style="color:{colour}">{qs.overall_score:.0f}</div>'
+                f'<div class="stat-label">Quality Score ({label})</div></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="stat-card"><div class="stat-value">—</div>'
+                '<div class="stat-label">Quality Score</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        f"<br><b>{md.dataset_name}</b> &nbsp;·&nbsp; "
+        f"Domain: <code>{md.data_domain.value}</code> &nbsp;·&nbsp; "
+        f"Classification: {badge(md.classification.value)} &nbsp;·&nbsp; "
+        f"v{md.version}",
+        unsafe_allow_html=True,
+    )
+    st.markdown("")
+
+    # ── Tabs ───────────────────────────────────────────────────────────────
+    tab_overview, tab_fields, tab_quality, tab_compliance, tab_raw = st.tabs([
+        "Overview", "Fields", "Quality Report", "Compliance", "Raw YAML",
+    ])
+
+    # ──────────────────── OVERVIEW tab ────────────────────────────────────
+    with tab_overview:
+        c1, c2 = st.columns([3, 2], gap="large")
+
+        with c1:
+            st.markdown("#### Dataset Description")
+            st.markdown(md.description)
+
+            st.markdown("#### Business Context")
+            st.markdown(md.business_context)
+
+            st.markdown("#### Usage Guidance")
+            st.markdown(md.usage_guidance)
+
+            if md.known_limitations:
+                st.markdown("#### Known Limitations")
+                st.warning(md.known_limitations)
+
+        with c2:
+            st.markdown("#### Dataset Details")
+            details = {
+                "Data Domain": md.data_domain.value.title(),
+                "Sub-Domain": md.sub_domain or "—",
+                "Classification": md.classification.value.upper(),
+                "Classification Rationale": md.data_classification_rationale,
+                "Source System": md.source_system or "—",
+                "Data Steward": md.data_steward or "—",
+                "Data Owner": md.data_owner or "—",
+                "Schema Version": md.schema_version,
+                "Generated By": md.generated_by,
+            }
+            for k, v in details.items():
+                col_k, col_v = st.columns([2, 3])
+                col_k.markdown(f"**{k}**")
+                col_v.markdown(str(v))
+
+            if md.related_datasets:
+                st.markdown("**Related Datasets**")
+                for ds in md.related_datasets:
+                    st.markdown(f"- `{ds}`")
+
+            if pii_fields:
+                st.markdown("#### PII Summary")
+                pii_by_type: dict = {}
+                for f in pii_fields:
+                    t = f.pii_type.value if f.pii_type else "other"
+                    pii_by_type.setdefault(t, []).append(f.name)
+                for pii_type, names in sorted(pii_by_type.items()):
+                    st.markdown(f"**{pii_type}**: {', '.join(f'`{n}`' for n in names)}")
+
+    # ──────────────────── FIELDS tab ──────────────────────────────────────
+    with tab_fields:
+        # Filter controls
+        fc1, fc2, fc3 = st.columns(3)
+        filter_pii = fc1.selectbox("Filter PII", ["All", "PII only", "Non-PII only"], index=0)
+        filter_sens = fc2.selectbox(
+            "Filter Sensitivity",
+            ["All", "public", "internal", "confidential", "restricted", "secret"],
+        )
+        search = fc3.text_input("Search field name", placeholder="e.g. account")
+
+        filtered = md.fields
+        if filter_pii == "PII only":
+            filtered = [f for f in filtered if f.is_pii]
+        elif filter_pii == "Non-PII only":
+            filtered = [f for f in filtered if not f.is_pii]
+        if filter_sens != "All":
+            filtered = [f for f in filtered if f.sensitivity_level.value == filter_sens]
+        if search:
+            filtered = [f for f in filtered if search.lower() in f.name.lower()]
+
+        st.markdown(f"Showing **{len(filtered)}** of **{len(md.fields)}** fields")
+
+        # Summary table
+        table_rows = []
+        for f in filtered:
+            table_rows.append({
+                "Field": f.name,
+                "Type": f.data_type.value,
+                "PII": f.pii_type.value if f.is_pii and f.pii_type else ("Yes" if f.is_pii else ""),
+                "Sensitivity": f.sensitivity_level.value.upper(),
+                "Key": "✓" if f.is_key_field else "",
+                "Nullable": "Yes" if f.constraints.nullable else "No",
+                "Description": f.description[:100] + ("…" if len(f.description) > 100 else ""),
+                "Usage Guidance": f.usage_guidance[:80] + ("…" if len(f.usage_guidance) > 80 else ""),
+            })
+
+        df = pd.DataFrame(table_rows)
+        st.dataframe(
+            df,
+            hide_index=True,
+            use_container_width=True,
+            height=min(600, 60 + len(filtered) * 36),
+            column_config={
+                "Sensitivity": st.column_config.TextColumn("Sensitivity", width="small"),
+                "Key": st.column_config.TextColumn("Key", width="small"),
+                "Nullable": st.column_config.TextColumn("Nullable", width="small"),
+                "Description": st.column_config.TextColumn("Description", width="large"),
+            },
+        )
+
+        st.divider()
+        st.markdown("#### Detailed Field View")
+        selected_field_name = st.selectbox(
+            "Select a field for full detail",
+            options=[f.name for f in md.fields],
+            index=0,
+        )
+        selected_field = next(f for f in md.fields if f.name == selected_field_name)
+
+        fd1, fd2 = st.columns(2)
+        with fd1:
+            st.markdown(f"**{selected_field.display_name}**")
+            st.markdown(f"*{selected_field.description}*")
+            st.markdown("")
+            for label, val in [
+                ("Data Type", selected_field.data_type.value),
+                ("Format", selected_field.format or "—"),
+                ("Is Key Field", "Yes" if selected_field.is_key_field else "No"),
+                ("Sensitivity", selected_field.sensitivity_level.value.upper()),
+                ("Nullable", "Yes" if selected_field.constraints.nullable else "No"),
+                ("Unique", "Yes" if selected_field.constraints.unique else "No"),
+                ("Pattern", selected_field.constraints.pattern or "—"),
+                ("Foreign Key Ref", selected_field.constraints.foreign_key_ref or "—"),
+            ]:
+                r1, r2 = st.columns([1, 2])
+                r1.markdown(f"**{label}**")
+                r2.markdown(str(val))
+
+            if selected_field.is_pii:
+                st.markdown(f"**PII Type:** `{selected_field.pii_type.value if selected_field.pii_type else 'flagged'}`")
+
+        with fd2:
+            st.markdown("**Business Context**")
+            st.markdown(selected_field.business_context or "—")
+            st.markdown("**Usage Guidance**")
+            st.info(selected_field.usage_guidance or "—")
+            if selected_field.business_rules:
+                st.markdown("**Business Rules**")
+                st.markdown(selected_field.business_rules)
+            if selected_field.data_lineage:
+                st.markdown("**Data Lineage**")
+                st.markdown(selected_field.data_lineage)
+            if selected_field.quality_notes:
+                st.markdown("**Quality Notes**")
+                st.warning(selected_field.quality_notes)
+            if selected_field.tags:
+                st.markdown("**Tags**")
+                st.markdown(" ".join(f"`{t}`" for t in selected_field.tags))
+            if selected_field.guardrail_applied:
+                st.markdown("**Guardrail Applied**")
+                st.warning(selected_field.guardrail_applied)
+
+    # ──────────────────── QUALITY REPORT tab ──────────────────────────────
+    with tab_quality:
+        if not qs:
+            st.info("No quality score available.")
+        else:
+            # Overall score
+            overall_color = "green" if qs.passed else "red"
+            status_label = "PASSED" if qs.passed else "FAILED"
+            st.markdown(
+                f"### Overall Quality Score: "
+                f":{overall_color}[**{qs.overall_score:.1f} / 100 — {status_label}**]"
+            )
+            st.progress(int(qs.overall_score))
+            st.markdown("")
+
+            # Dimension breakdown
+            st.markdown("#### Dimension Scores")
+            dims = [
+                ("Completeness", qs.completeness, "30%",
+                 "All required metadata fields populated with meaningful content"),
+                ("PII Detection", qs.pii_detection, "25%",
+                 "AI PII flags vs column name heuristics and extractor detection"),
+                ("Type Consistency", qs.type_consistency, "20%",
+                 "Declared data types match what was inferred from the data"),
+                ("Banking Standards (BCBS 239)", qs.banking_standards, "15%",
+                 "Data lineage, GDPR compliance fields, key field identification"),
+                ("Sensitivity Consistency", qs.sensitivity_consistency, "10%",
+                 "PII sensitivity floors and classification internal consistency"),
+            ]
+            for name, dim, weight, help_text in dims:
+                col_label, col_bar, col_score, col_status = st.columns([3, 4, 1.5, 1.5])
+                col_label.markdown(f"**{name}** `{weight}`")
+                col_label.markdown(f"<small>{help_text}</small>", unsafe_allow_html=True)
+                bar_color = "normal" if dim.passed else "off"
+                col_bar.progress(int(dim.score), text="")
+                col_score.markdown(f"**{dim.score:.1f}**")
+                if dim.passed:
+                    col_status.success("PASS")
+                else:
+                    col_status.error("FAIL")
+
+                if dim.issues:
+                    for issue in dim.issues:
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;🔴 {issue}")
+                if dim.warnings:
+                    for warning in dim.warnings[:3]:
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;🟡 {warning}")
+                st.markdown("")
+
+            # Guardrails
+            if qs.guardrails_applied:
+                st.divider()
+                st.markdown(f"#### Guardrails Applied ({len(qs.guardrails_applied)})")
+                for msg in qs.guardrails_applied:
+                    st.warning(msg, icon="⚑")
+
+    # ──────────────────── COMPLIANCE tab ──────────────────────────────────
+    with tab_compliance:
+        c = md.compliance
+        cl1, cl2 = st.columns(2)
+
+        with cl1:
+            st.markdown("#### GDPR / UK GDPR")
+            flags = [
+                ("GDPR Applicable", c.gdpr_applicable),
+                ("UK GDPR Applicable", c.uk_gdpr_applicable),
+                ("Right to Erasure Applicable", c.right_to_erasure_applicable),
+                ("Consent Required", c.consent_required),
+                ("Cross-Border Transfer Restrictions", c.cross_border_transfer_restrictions),
+            ]
+            for label, val in flags:
+                icon = "🟡" if val else "⚪"
+                st.markdown(f"{icon} **{label}:** {'Yes' if val else 'No'}")
+
+            st.markdown("")
+            st.markdown("#### Data Governance")
+            for label, val in [
+                ("Lawful Basis", c.lawful_basis or "Not specified"),
+                ("Retention Period", c.retention_period or "Not specified"),
+                ("Data Residency", c.data_residency_requirements or "Not specified"),
+            ]:
+                k, v = st.columns([2, 3])
+                k.markdown(f"**{label}**")
+                v.markdown(val)
+
+        with cl2:
+            st.markdown("#### Regulatory Frameworks")
+            if c.regulatory_frameworks:
+                for rf in c.regulatory_frameworks:
+                    st.markdown(f"✓ **{rf.value}**")
+            else:
+                st.markdown("*None specified*")
+
+            if pii_fields:
+                st.markdown("")
+                st.markdown("#### PII Field Register")
+                for f in sorted(pii_fields, key=lambda x: x.sensitivity_level.rank, reverse=True):
+                    sens_col = SENSITIVITY_COLORS.get(f.sensitivity_level.value, "#64748B")
+                    st.markdown(
+                        f"<span style='color:{sens_col}; font-weight:700;'>"
+                        f"● {f.sensitivity_level.value.upper()}</span> &nbsp;"
+                        f"`{f.name}` — {f.pii_type.value if f.pii_type else 'PII'}",
+                        unsafe_allow_html=True,
+                    )
+
+    # ──────────────────── RAW YAML tab ────────────────────────────────────
+    with tab_raw:
+        import json as _json
+        raw_dict = _json.loads(md.model_dump_json())
+        yaml_str = yaml.dump(raw_dict, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        st.code(yaml_str, language="yaml", line_numbers=True)
+
+    # ── Download section ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Download Metadata")
+    st.markdown(
+        "Export the curated metadata for data catalogue ingestion, stakeholder review, or governance sign-off.",
+    )
+
+    dl1, dl2, dl3 = st.columns(3)
+
+    base_name = md.dataset_name.lower().replace(" ", "_")
+
+    with dl1:
+        try:
+            csv_bytes = export_csv(md)
+            st.download_button(
+                label="⬇ Download CSV",
+                data=csv_bytes,
+                file_name=f"{base_name}_metadata.csv",
+                mime="text/csv",
+                use_container_width=True,
+                help="Flat field inventory table. Load into Excel or a data catalogue API.",
+            )
+            st.caption("Field inventory table · best for Excel / catalogue ingestion")
+        except Exception as e:
+            st.error(f"CSV export error: {e}")
+
+    with dl2:
+        try:
+            pdf_bytes = export_pdf(md)
+            st.download_button(
+                label="⬇ Download PDF",
+                data=pdf_bytes,
+                file_name=f"{base_name}_metadata.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                help="Structured PDF document for stakeholder review and data governance sign-off.",
+            )
+            st.caption("Structured document · best for stakeholder review")
+        except Exception as e:
+            st.error(f"PDF export error: {e}")
+
+    with dl3:
+        try:
+            word_bytes = export_word(md)
+            st.download_button(
+                label="⬇ Download Word",
+                data=word_bytes,
+                file_name=f"{base_name}_metadata.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                help="Editable Word document. Data stewards can annotate and approve.",
+            )
+            st.caption("Editable document · best for data steward sign-off")
+        except Exception as e:
+            st.error(f"Word export error: {e}")
+
+    # Also offer YAML download
+    import json as _json2
+    yaml_download = yaml.dump(
+        _json2.loads(md.model_dump_json()),
+        default_flow_style=False, allow_unicode=True, sort_keys=False
+    ).encode("utf-8")
+    st.download_button(
+        label="⬇ Download YAML (machine-readable)",
+        data=yaml_download,
+        file_name=f"{base_name}_metadata.yaml",
+        mime="text/yaml",
+        help="YAML output for data catalogue API ingestion (Collibra, Atlan, DataHub).",
+    )
