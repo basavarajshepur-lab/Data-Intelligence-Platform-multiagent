@@ -553,12 +553,17 @@ else:
 
         st.divider()
         st.markdown("#### Detailed Field View")
+        field_names = [f.name for f in md.fields]
         selected_field_name = st.selectbox(
             "Select a field for full detail",
-            options=[f.name for f in md.fields],
+            options=field_names,
             index=0,
-        )
-        selected_field = next(f for f in md.fields if f.name == selected_field_name)
+        ) if field_names else None
+        selected_field = next((f for f in md.fields if f.name == selected_field_name), None)
+
+        if not selected_field:
+            st.info("No fields available to display.")
+            st.stop()
 
         fd1, fd2 = st.columns(2)
         with fd1:
