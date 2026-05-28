@@ -186,6 +186,8 @@ for key, default in {
     "profile": None,
     "error": None,
     "last_filename": None,
+    "_staged_bytes": None,
+    "_staged_name": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -229,10 +231,8 @@ with st.sidebar:
             )
         st.divider()
         if st.button("Clear results / New file", use_container_width=True):
-            st.session_state.metadata = None
-            st.session_state.profile = None
-            st.session_state.last_filename = None
-            st.session_state.error = None
+            for k in ["metadata", "profile", "last_filename", "error", "_staged_bytes", "_staged_name"]:
+                st.session_state[k] = None
             st.rerun()
 
     st.markdown("### About")
@@ -291,14 +291,31 @@ if st.session_state.metadata is None:
         for label, path in SAMPLE_FILES.items():
             if st.button(label, use_container_width=True, key=f"sample_{label}"):
                 with open(path, "rb") as f:
-                    uploaded = io.BytesIO(f.read())
-                    uploaded.name = Path(path).name
+                    data = f.read()
+                new_name = Path(path).name
+                # Reset profile only when switching to a different file
+                if new_name != st.session_state["_staged_name"]:
+                    st.session_state["profile"] = None
+                st.session_state["_staged_bytes"] = data
+                st.session_state["_staged_name"] = new_name
 
-    # ── File preview ───────────────────────────────────────────────────────
-    if uploaded:
-        filename = getattr(uploaded, "name", "uploaded_file")
-        file_bytes = uploaded.read() if hasattr(uploaded, "read") else uploaded.getvalue()
+    # ── Resolve file source ─────────────────────────────────────────────────
+    # Prefer a freshly uploaded file; fall back to bytes staged in session state
+    # (staged bytes survive the Generate-click rerun where file_uploader may return None)
+    if uploaded is not None:
+        # Use getvalue() — avoids cursor exhaustion on repeated reruns
+        file_bytes = uploaded.getvalue()
+        filename = getattr(uploaded, "name", "upload")
+        if filename != st.session_state["_staged_name"]:
+            st.session_state["profile"] = None  # new file — force re-extraction
+        st.session_state["_staged_bytes"] = file_bytes
+        st.session_state["_staged_name"] = filename
+    else:
+        file_bytes = st.session_state["_staged_bytes"]
+        filename = st.session_state["_staged_name"]
 
+    # ── Extract profile if not already done for this file ───────────────────
+    if file_bytes and st.session_state["profile"] is None:
         with st.spinner("Profiling dataset..."):
             try:
                 profile = _extract_profile(file_bytes, filename)
@@ -307,13 +324,15 @@ if st.session_state.metadata is None:
                 st.error(f"Could not read file: {e}")
                 st.stop()
 
+    # ── Show preview and Generate button whenever a profile exists ──────────
+    current_profile = st.session_state.profile
+    if current_profile:
         st.success(
-            f"**{profile.dataset_name}** — {len(profile.fields)} fields detected "
-            f"{'· ' + str(profile.row_count) + ' rows' if profile.row_count else ''}"
+            f"**{current_profile.dataset_name}** — {len(current_profile.fields)} fields detected "
+            f"{'· ' + str(current_profile.row_count) + ' rows' if current_profile.row_count else ''}"
         )
 
-        # Field preview table
-        pii_count = sum(1 for f in profile.fields if f.is_potential_pii)
+        pii_count = sum(1 for f in current_profile.fields if f.is_potential_pii)
         if pii_count:
             st.info(
                 f"**{pii_count} potential PII field(s)** detected by column-name heuristic "
@@ -329,18 +348,17 @@ if st.session_state.metadata is None:
                 "Unique Values": f.unique_count if f.unique_count is not None else "—",
                 "Potential PII": "🔴" if f.is_potential_pii else "",
             }
-            for f in profile.fields
+            for f in current_profile.fields
         ])
         st.dataframe(
             preview_df,
             hide_index=True,
             use_container_width=True,
-            height=min(400, 40 + len(profile.fields) * 36),
+            height=min(400, 40 + len(current_profile.fields) * 36),
         )
 
         st.divider()
 
-        # Generate button
         btn_disabled = not _api_key_set()
         if st.button(
             "Generate Metadata" + (" (API key required)" if btn_disabled else ""),
@@ -352,9 +370,10 @@ if st.session_state.metadata is None:
                 try:
                     config = AgentConfig(model=selected_model)
                     agent = MetadataAgent(config)
-                    metadata, _ = agent.generate(profile)
+                    # Always read from session state — local variables don't survive reruns
+                    metadata, _ = agent.generate(st.session_state.profile)
                     st.session_state.metadata = metadata
-                    st.session_state.last_filename = filename
+                    st.session_state.last_filename = st.session_state["_staged_name"]
                     st.session_state.error = None
                     st.rerun()
                 except Exception as e:
