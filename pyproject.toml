@@ -1,0 +1,35 @@
+[project]
+name = "metadata-agent"
+version = "1.0.0"
+description = "AI-powered metadata generation agent for banking datasets — BCBS 239, UK GDPR, and enterprise data governance standards"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Basavaraj Shepur" }]
+keywords = ["metadata", "data-governance", "banking", "BCBS-239", "GDPR", "AI", "Claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "anthropic>=0.40.0",
+    "pydantic>=2.5.0",
+    "pandas>=2.1.0",
+    "pyyaml>=6.0.1",
+    "rich>=13.7.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+metadata-agent = "demo:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

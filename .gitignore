@@ -1,0 +1,38 @@
+# Environment
+.env
+*.env.local
+
+# Generated outputs (don't commit generated metadata — it may contain sensitive field names)
+outputs/*.yaml
+outputs/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/

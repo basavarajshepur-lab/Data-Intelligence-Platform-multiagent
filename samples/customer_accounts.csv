@@ -1,0 +1,11 @@
+customer_id,first_name,last_name,email,phone,date_of_birth,national_insurance,account_number,sort_code,account_type,balance,credit_score,risk_rating,kyc_status,created_date,last_login,relationship_manager_id,marketing_consent
+a1f3c2e4-88b2-4d1a-9f3e-2c1a4b5d6e7f,James,Morrison,j.morrison@email.com,07712345678,1978-04-15,AB123456C,12345678,20-30-40,current,4521.67,742,low,verified,2019-03-12,2024-01-08,RM-002,true
+b2d4e5f6-99c3-5e2b-ag4f-3d2b5c6e7f8a,Sarah,Thompson,s.thompson@email.com,07898765432,1985-11-22,CD789012E,87654321,40-50-60,savings,12850.00,815,very_low,verified,2021-07-03,2024-01-10,RM-007,false
+c3e5f6a7-a0d4-6f3c-bh5g-4e3c6d7f8a9b,Michael,Patel,m.patel@email.com,07534567890,1991-06-08,EF345678G,23456789,10-20-30,current,820.14,631,medium,pending_review,2022-11-18,2023-12-29,RM-001,true
+d4f6a7b8-b1e5-7a4d-ci6h-5f4d7e8a9b0c,Emily,Chen,e.chen@email.com,07623456789,1983-02-28,GH901234I,34567890,60-70-80,isa,31200.00,790,low,verified,2018-06-25,2024-01-11,RM-004,true
+e5a7b8c9-c2f6-8b5e-dj7i-6a5e8f9b0c1d,Robert,Williams,r.williams@email.com,07712340000,1976-09-14,IJ567890K,45678901,20-30-40,current,275.43,589,high,failed,2023-04-01,2023-11-15,,false
+f6b8c9d0-d3a7-9c6f-ek8j-7b6f9a0c1d2e,Priya,Singh,p.singh@email.com,07897654321,1994-12-03,KL234567M,56789012,40-50-60,savings,8750.00,768,low,verified,2020-09-15,2024-01-09,RM-003,true
+a7c9d0e1-e4b8-0d7a-fl9k-8c7a0b1d2e3f,David,O'Brien,d.obrien@email.com,07534560000,1988-07-19,MN890123O,67890123,10-20-30,current,3200.00,720,low,verified,2017-01-30,2024-01-07,RM-005,false
+b8d0e1f2-f5c9-1e8b-gm0l-9d8b1c2e3f4a,Lisa,Martinez,l.martinez@email.com,07623450000,1979-03-25,OP456789Q,78901234,60-70-80,current,9100.55,801,very_low,verified,2016-08-12,2024-01-12,RM-006,true
+c9e1f2a3-a6d0-2f9c-hn1m-0e9c2d3f4a5b,Kevin,Brown,k.brown@email.com,07712345000,1997-10-07,QR123456S,89012345,20-30-40,student,150.00,441,medium,verified,2023-08-22,2024-01-05,,true
+d0f2a3b4-b7e1-3a0d-io2n-1f0d3e4a5b6c,Fatima,Al-Hassan,f.alhassan@email.com,07898760000,1986-01-11,ST789012U,90123456,40-50-60,current,22400.00,855,very_low,verified,2015-04-09,2024-01-13,RM-008,false
