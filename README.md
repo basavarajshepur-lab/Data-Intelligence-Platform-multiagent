@@ -1,4 +1,4 @@
-# Metadata Intelligence Platform
+# Data Intelligence Platform (Metadata curation, Lineage, Data Quality)
 
 An AI-powered, multi-agent data governance platform for global banking institutions. Three specialised Claude agents — **Metadata**, **Lineage**, and **Data Quality** — work together to automate the most time-consuming parts of data governance: cataloguing datasets, mapping field-level lineage, and profiling data quality.
 
