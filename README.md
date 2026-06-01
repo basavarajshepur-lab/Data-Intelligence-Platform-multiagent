@@ -106,6 +106,60 @@ The agent only requests **read-only** scopes (`gmail.readonly`, `drive.readonly`
 
 ---
 
+## Background watcher — automatic processing
+
+The watcher polls Gmail and Google Drive on a schedule and runs the metadata agent on any new attachments automatically, without you having to click anything in the UI.
+
+### Starting the watcher
+
+Open a **second terminal** alongside the Streamlit app and run:
+
+```bash
+# Poll every 60 minutes, runs until Ctrl+C (default)
+python watcher.py
+
+# Poll every 30 minutes
+python watcher.py --interval 30
+
+# Poll once and exit — useful for testing or Task Scheduler
+python watcher.py --once
+```
+
+Logs are printed to the terminal and saved to `outputs/watcher.log`.
+
+### How it works
+
+```
+Every hour:
+  Gmail → find emails with .csv / .json / .sql attachments
+         → skip files already recorded in processed_sources table
+         → download new ones → run metadata agent → save to memory DB
+
+  Drive → list .csv / .json / .sql files, newest first
+         → skip already-processed (tracked by file ID + modifiedTime)
+         → re-uploaded files get a new modifiedTime, so are reprocessed
+         → download → run metadata agent → save to memory DB
+```
+
+Files are never processed twice. If you re-upload a Drive file or re-send an email with a corrected dataset, the watcher detects the change and reprocesses it automatically.
+
+### Run automatically with Windows Task Scheduler
+
+To have the watcher run even when you are not at your computer:
+
+1. Press **Win + R**, type `taskschd.msc`, press Enter
+2. Click **Create Basic Task** → name it `Metadata Agent Watcher`
+3. Trigger: **Daily** → check **Repeat task every: 1 hour**
+4. Action: **Start a program**
+   - Program: `python`
+   - Arguments: `"C:\Users\basav\OneDrive\Documents\Portfolio\metadata-agent\watcher.py" --once`
+   - Start in: `C:\Users\basav\OneDrive\Documents\Portfolio\metadata-agent`
+5. Click **Finish**
+
+Using `--once` with Task Scheduler is cleaner than a long-running process — the scheduler controls the timing and restarts the script if it crashes.
+
+---
+
 ## CLI (alternative to the web UI)
 
 ```bash
