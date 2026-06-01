@@ -218,3 +218,67 @@ class DatasetMetadata(BaseModel):
             f for f in self.fields
             if f.sensitivity_level.rank >= SensitivityLevel.RESTRICTED.rank
         ]
+
+
+# ── Lineage models (DataLineageAgent output) ───────────────────────────────
+
+class LineageSource(BaseModel):
+    table: str
+    column: str
+
+
+class FieldLineage(BaseModel):
+    target_field: str
+    source_fields: List[LineageSource]
+    transformation: Optional[str] = None      # e.g. "SUM(amount)", "CASE WHEN..."
+    lineage_type: str = "direct"              # direct | derived | aggregated | constant
+    confidence: str = "HIGH"                  # HIGH | MEDIUM | LOW
+    bcbs_note: Optional[str] = None           # BCBS 239 principle annotation
+
+
+class DatasetLineage(BaseModel):
+    dataset_name: str
+    source_sql: Optional[str] = None
+    source_tables: List[str] = Field(default_factory=list)
+    field_lineages: List[FieldLineage] = Field(default_factory=list)
+    unresolved_fields: List[str] = Field(default_factory=list)
+    bcbs_239_compliant: bool = False
+    bcbs_notes: Optional[str] = None
+    generated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    generated_by: str = "lineage-agent v0.1"
+
+
+# ── Quality models (DataQualityAgent output) ──────────────────────────────
+
+class FieldExpectation(BaseModel):
+    """A single Great Expectations-compatible expectation."""
+    expectation_type: str             # e.g. expect_column_values_to_not_be_null
+    kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FieldQualityResult(BaseModel):
+    field_name: str
+    completeness_score: float         # 0–100
+    issues: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    expectations: List[FieldExpectation] = Field(default_factory=list)
+    quality_notes: str = ""
+
+
+class DamaDimension(BaseModel):
+    """One of the six DAMA-DMBOK data quality dimensions."""
+    score: float                      # 0–100
+    issues: List[str] = Field(default_factory=list)
+    notes: str = ""
+
+
+class DataQualityReport(BaseModel):
+    dataset_name: str
+    overall_score: float
+    passed: bool                      # overall_score >= 75
+    dimensions: Dict[str, DamaDimension]  # completeness/consistency/accuracy/timeliness/uniqueness/validity
+    field_quality: List[FieldQualityResult] = Field(default_factory=list)
+    critical_issues: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+    generated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    generated_by: str = "quality-agent v0.1"
