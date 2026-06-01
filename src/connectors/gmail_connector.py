@@ -1,11 +1,30 @@
 """Gmail connector — list emails with CSV/JSON/SQL attachments and download them."""
 
 import base64
-import os
 import tempfile
 from pathlib import Path
 
 SUPPORTED_EXTENSIONS = {".csv", ".json", ".sql", ".ddl"}
+
+
+def _collect_attachments(parts: list, result: list) -> None:
+    """Recursively walk a message part tree to collect attachment metadata."""
+    for part in parts:
+        fname = part.get("filename", "")
+        body = part.get("body", {})
+        # A real attachment has a filename and an attachmentId
+        if fname and Path(fname).suffix.lower() in SUPPORTED_EXTENSIONS and body.get("attachmentId"):
+            result.append(
+                {
+                    "filename": fname,
+                    "attachment_id": body["attachmentId"],
+                    "size_bytes": body.get("size", 0),
+                }
+            )
+        # Recurse into nested multipart containers
+        sub_parts = part.get("parts", [])
+        if sub_parts:
+            _collect_attachments(sub_parts, result)
 
 
 def list_emails_with_attachments(max_results: int = 30) -> list[dict]:
@@ -15,7 +34,8 @@ def list_emails_with_attachments(max_results: int = 30) -> list[dict]:
 
     service = build("gmail", "v1", credentials=get_credentials())
 
-    query = "has:attachment (filename:*.csv OR filename:*.json OR filename:*.sql OR filename:*.ddl)"
+    # Gmail search: filename: operator matches substrings — ".csv" matches any *.csv attachment
+    query = "has:attachment (filename:.csv OR filename:.json OR filename:.sql OR filename:.ddl)"
     result = (
         service.users()
         .messages()
@@ -26,33 +46,20 @@ def list_emails_with_attachments(max_results: int = 30) -> list[dict]:
 
     emails = []
     for raw in raw_msgs:
+        # format="full" is required to get the parts tree with attachmentId values
         detail = (
             service.users()
             .messages()
-            .get(
-                userId="me",
-                id=raw["id"],
-                format="metadata",
-                metadataHeaders=["Subject", "From", "Date"],
-            )
+            .get(userId="me", id=raw["id"], format="full")
             .execute()
         )
+        payload = detail.get("payload", {})
         headers = {
-            h["name"]: h["value"]
-            for h in detail.get("payload", {}).get("headers", [])
+            h["name"]: h["value"] for h in payload.get("headers", [])
         }
 
-        attachments = []
-        for part in detail.get("payload", {}).get("parts", []):
-            fname = part.get("filename", "")
-            if fname and Path(fname).suffix.lower() in SUPPORTED_EXTENSIONS:
-                attachments.append(
-                    {
-                        "filename": fname,
-                        "attachment_id": part.get("body", {}).get("attachmentId"),
-                        "size_bytes": part.get("body", {}).get("size", 0),
-                    }
-                )
+        attachments: list[dict] = []
+        _collect_attachments(payload.get("parts", []), attachments)
 
         if attachments:
             emails.append(
