@@ -48,6 +48,19 @@ Launch with `streamlit run app.py`.
 | **From Gmail** | Connect your Google account once; the tab lists every email in your inbox that has a CSV/JSON/SQL attachment. Click any attachment to process it. |
 | **From Google Drive** | Browses your Drive for supported files, newest first. Search by name. Click to download and process. |
 
+Eight sample datasets are included to try immediately:
+
+| Sample file | Domain | Fields | Expected score |
+|-------------|--------|--------|----------------|
+| `customer_accounts.csv` | Retail banking | 18 | 88–95% |
+| `transaction_schema.json` | Payments | 26 | 88–95% |
+| `risk_positions.sql` | Market risk | 42 | 88–95% |
+| `collateral_register.csv` | Collateral management | 25 | 73–80% |
+| `kyc_screening_results.csv` | AML / KYC | 22 | 70–78% |
+| `interest_rate_curves.json` | Treasury / rates | 23 | 72–80% |
+| `system_access_log.sql` | IT / audit | 26 | 70–76% |
+| `trade_confirmations.csv` | Fixed income trading | 30 | 75–82% |
+
 After selecting a file from any tab, the extractor profiles it locally — no API call yet — and shows a field preview table with inferred types, null rates, and PII heuristic flags.
 
 > Suspected PII columns are **masked before any values leave your machine**. The Claude prompt only sees column names and statistics, never the actual values.
@@ -301,9 +314,14 @@ metadata-agent/
 ├── .streamlit/
 │   └── config.toml                # Navy/blue banking theme
 ├── samples/
-│   ├── customer_accounts.csv      # 18-field retail banking customer dataset
-│   ├── transaction_schema.json    # 26-field payment transaction JSON Schema
-│   └── risk_positions.sql         # 42-field trading book risk positions DDL
+│   ├── customer_accounts.csv      # 18-field retail banking customer dataset (scores ~88–95%)
+│   ├── transaction_schema.json    # 26-field payment transaction JSON Schema (scores ~88–95%)
+│   ├── risk_positions.sql         # 42-field trading book risk positions DDL (scores ~88–95%)
+│   ├── collateral_register.csv    # 25-field collateral management register (scores ~73–80%)
+│   ├── kyc_screening_results.csv  # 22-field AML/KYC screening results (scores ~70–78%)
+│   ├── interest_rate_curves.json  # Rate curve snapshot JSON Schema (scores ~72–80%)
+│   ├── system_access_log.sql      # 26-field system audit/access log DDL (scores ~70–76%)
+│   └── trade_confirmations.csv    # 30-field fixed income trade confirms (scores ~75–82%)
 ├── outputs/                       # Generated metadata files (gitignored)
 │   └── memory.db                  # SQLite agent memory (gitignored)
 └── src/

@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InterestRateCurveSnapshot",
+  "description": "Intraday interest rate curve snapshot distributed to front-office pricing and risk systems",
+  "type": "object",
+  "required": ["curve_id", "curve_type", "ccy", "snap_dt", "snap_time", "status_cd", "tenors"],
+  "properties": {
+    "curve_id": {
+      "type": "string",
+      "description": "Unique identifier for the curve snapshot"
+    },
+    "curve_type": {
+      "type": "string",
+      "enum": ["SOFR", "SONIA", "ESTR", "EURIBOR3M", "EURIBOR6M", "LIBOR_USD", "CDOR", "BBSW"]
+    },
+    "ccy": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "snap_dt": {
+      "type": "string",
+      "format": "date"
+    },
+    "snap_time": {
+      "type": "string",
+      "description": "HH:MM:SS London local time of the snapshot"
+    },
+    "source_sys": {
+      "type": "string"
+    },
+    "status_cd": {
+      "type": "string",
+      "enum": ["DRAFT", "APPROVED", "PUBLISHED", "SUPERSEDED"]
+    },
+    "calc_method": {
+      "type": "string",
+      "enum": ["BOOTSTRAP", "NELSONSIEG", "SMOOTHSPLINE"]
+    },
+    "interp_method": {
+      "type": "string",
+      "enum": ["LINEAR", "LOGLINEAR", "CUBICSPLINE", "STEPFWD"]
+    },
+    "tenors": {
+      "type": "array",
+      "description": "Array of tenor points on the curve",
+      "items": {
+        "type": "object",
+        "required": ["tenor_cd", "days_to_mat", "mid_rate"],
+        "properties": {
+          "tenor_cd": {
+            "type": "string",
+            "description": "Tenor label e.g. 1W, 1M, 3M, 6M, 1Y, 5Y, 10Y, 30Y"
+          },
+          "days_to_mat": {
+            "type": "integer"
+          },
+          "mid_rate": {
+            "type": "number",
+            "description": "Mid-market rate as a decimal (0.0525 = 5.25%)"
+          },
+          "bid_rate": {
+            "type": ["number", "null"]
+          },
+          "ask_rate": {
+            "type": ["number", "null"]
+          },
+          "bps_chg_1d": {
+            "type": ["number", "null"]
+          },
+          "implied_fwd": {
+            "type": ["number", "null"]
+          },
+          "ois_spread": {
+            "type": ["number", "null"]
+          }
+        }
+      }
+    },
+    "version": {
+      "type": "integer"
+    },
+    "prev_version_id": {
+      "type": ["string", "null"]
+    },
+    "approved_by": {
+      "type": ["string", "null"],
+      "description": "User ID of the treasury quant who approved this curve"
+    },
+    "approved_ts": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "published_ts": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "downstream_systems": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of system codes that consumed this curve version"
+    }
+  }
+}
