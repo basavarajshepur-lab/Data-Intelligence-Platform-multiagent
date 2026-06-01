@@ -1,23 +1,16 @@
-"""Data Lineage Agent — maps field-level data lineage from SQL and pipeline definitions.
+"""Data Lineage Agent — maps field-level lineage from SQL and pipeline definitions.
 
-Status: STUB — not yet implemented.
+System prompt and configuration are loaded from agents/lineage_agent.md.
+Edit that file to change the agent's behaviour without touching Python code.
 
-Planned capabilities
---------------------
-- Parse SQL SELECT statements to trace column-level lineage
-- Map source → transformation → target across pipeline stages
-- Output lineage graphs compatible with OpenLineage / Marquez
-- Populate the data_lineage field on existing DatasetMetadata entries
-
-To implement:
-1. Define input (SQL file / dbt manifest / Spark plan)
-2. Define output schema (LineageGraph Pydantic model)
-3. Add tools: parse_sql_lineage, resolve_table_alias, write_lineage_graph
-4. Implement handle_tool_call() and run()
+Status: STUB — tools not yet implemented.
+See agents/lineage_agent.md for the full specification.
 """
 
 from .base import BaseAgent
-from ..config import AgentConfig
+from .loader import load_agent
+
+_MD_CONFIG, _SYSTEM_PROMPT = load_agent("lineage_agent")
 
 
 class LineageAgent(BaseAgent):
@@ -25,18 +18,18 @@ class LineageAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        return (
-            "You are a data lineage specialist. "
-            "Trace the origin of every field in a SQL query or pipeline definition, "
-            "following BCBS 239 Principle 2 (data lineage) and DAMA-DMBOK guidelines."
-        )
+        return _SYSTEM_PROMPT
 
     @property
     def tools(self) -> list[dict]:
-        return []  # add tools here when implementing
+        # Add tool schemas here as they are implemented
+        return []
 
     def handle_tool_call(self, name: str, inputs: dict) -> str:
         return "Not implemented."
 
     def run(self, *args, **kwargs):
-        raise NotImplementedError("LineageAgent is not yet implemented.")
+        raise NotImplementedError(
+            "LineageAgent is not yet implemented. "
+            "See agents/lineage_agent.md for the specification."
+        )

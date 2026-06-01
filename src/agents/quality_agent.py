@@ -1,25 +1,16 @@
-"""Data Quality Agent — runs automated profiling and quality checks on datasets.
+"""Data Quality Agent — DAMA-DMBOK profiling and Great Expectations rule generation.
 
-Status: STUB — not yet implemented.
+System prompt and configuration are loaded from agents/quality_agent.md.
+Edit that file to change the agent's behaviour without touching Python code.
 
-Planned capabilities
---------------------
-- Profile a dataset and produce a DataQualityReport
-- Detect nulls, duplicates, outliers, referential integrity violations
-- Generate Great Expectations-compatible expectation suites
-- Score against DAMA-DMBOK data quality dimensions:
-    completeness, consistency, accuracy, timeliness, uniqueness, validity
-- Write quality_notes back to existing DatasetMetadata entries
-
-To implement:
-1. Define input (DatasetProfile or raw file path)
-2. Define output schema (DataQualityReport Pydantic model)
-3. Add tools: profile_dataset, check_referential_integrity, generate_expectations
-4. Implement handle_tool_call() and run()
+Status: STUB — tools not yet implemented.
+See agents/quality_agent.md for the full specification.
 """
 
 from .base import BaseAgent
-from ..config import AgentConfig
+from .loader import load_agent
+
+_MD_CONFIG, _SYSTEM_PROMPT = load_agent("quality_agent")
 
 
 class DataQualityAgent(BaseAgent):
@@ -27,19 +18,18 @@ class DataQualityAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        return (
-            "You are a data quality engineer specialising in financial services data. "
-            "Apply DAMA-DMBOK quality dimensions and BCBS 239 Principles 3–6 "
-            "(accuracy, completeness, timeliness, adaptability) to profile datasets "
-            "and generate actionable quality rules and expectation suites."
-        )
+        return _SYSTEM_PROMPT
 
     @property
     def tools(self) -> list[dict]:
-        return []  # add tools here when implementing
+        # Add tool schemas here as they are implemented
+        return []
 
     def handle_tool_call(self, name: str, inputs: dict) -> str:
         return "Not implemented."
 
     def run(self, *args, **kwargs):
-        raise NotImplementedError("DataQualityAgent is not yet implemented.")
+        raise NotImplementedError(
+            "DataQualityAgent is not yet implemented. "
+            "See agents/quality_agent.md for the specification."
+        )
