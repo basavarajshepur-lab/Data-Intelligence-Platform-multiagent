@@ -22,7 +22,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from src.agent import MetadataAgent
+from src.agents import MetadataAgent
 from src.config import AgentConfig
 from src.extractors import extract
 from src.schema import DatasetMetadata, QualityScore, SensitivityLevel

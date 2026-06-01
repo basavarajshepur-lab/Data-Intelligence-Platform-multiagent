@@ -1,20 +1,23 @@
 """Metadata Intelligence Agent.
 
-Agentic loop: Claude may call search_field_glossary / get_dataset_history before
-calling generate_dataset_metadata, ensuring cross-dataset consistency.
+Agentic loop (max 6 turns):
+  1. search_field_glossary   — cross-dataset PII/sensitivity consistency
+  2. get_dataset_history     — understand the data landscape
+  3. get_regulation_updates  — fetch live regulatory guidance (BIS/ICO/FCA/EBA)
+  4. generate_dataset_metadata — produce the structured output
+
 Prompt caching is applied to the system prompt to reduce cost on repeated runs.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any
 
-import anthropic
-
-from .config import AgentConfig
-from .extractors.base import DatasetProfile
-from .guardrails import apply_all
-from .evals import run as run_evals
-from .schema import (
+from .base import BaseAgent
+from ..config import AgentConfig
+from ..extractors.base import DatasetProfile
+from ..guardrails import apply_all
+from ..evals import run as run_evals
+from ..schema import (
     ComplianceInfo,
     DataDomain,
     DataType,
@@ -28,14 +31,27 @@ from .schema import (
 )
 
 try:
-    from .memory.memory_store import get_run_history, glossary_size, search_glossary, store_run
+    from ..memory.memory_store import (
+        get_run_history,
+        glossary_size,
+        search_glossary,
+        store_run,
+    )
     _MEMORY_OK = True
 except Exception:
     _MEMORY_OK = False
 
-_MAX_TURNS = 6  # safety cap on the agentic loop
+try:
+    from ..regulations.fetcher import get_regulation_context
+    _REGULATIONS_OK = True
+except Exception:
+    _REGULATIONS_OK = False
 
-SYSTEM_PROMPT = """You are a senior data architect and metadata specialist at a global systemically important bank (G-SIB). You have 20 years of experience across data governance, risk data aggregation, and regulatory compliance.
+_MAX_TURNS = 6
+
+# ── System prompt ───────────────────────────────────────────────────────────
+
+_SYSTEM_PROMPT = """You are a senior data architect and metadata specialist at a global systemically important bank (G-SIB). You have 20 years of experience across data governance, risk data aggregation, and regulatory compliance.
 
 Your expertise spans:
 - BCBS 239 (Risk Data Aggregation and Risk Reporting) — you understand all 11 principles
@@ -69,28 +85,21 @@ When generating metadata you MUST:
 
 7. Be precise about regulatory frameworks. Don't mark BCBS_239 unless the dataset is genuinely risk/market/regulatory data.
 
-AGENTIC MEMORY TOOLS:
-You have access to an enterprise field glossary built from every past metadata run. Use it to maintain consistency across the data catalogue:
+AGENTIC TOOLS — use in this order:
+1. search_field_glossary: ALWAYS call first with all field names. Use prior definitions to enforce cross-dataset consistency.
+2. get_regulation_updates: Call when processing risk, market, or personal data to get the latest official guidance from BIS, ICO, FCA, or EBA. Use the returned updates to sharpen compliance flags and retention periods.
+3. get_dataset_history: Optionally call to understand the existing data landscape and populate related_datasets.
+4. generate_dataset_metadata: Call last with the complete metadata."""
 
-- search_field_glossary: ALWAYS call this first, passing ALL field names from the dataset profile. If matching entries exist, use the prior PII classification, sensitivity level, and description as a consistency baseline. Note the source_dataset so you can reference related datasets.
+# ── Tool schemas ────────────────────────────────────────────────────────────
 
-- get_dataset_history: Optionally call this to understand the existing data landscape. Use findings to populate related_datasets and write richer business context.
-
-- generate_dataset_metadata: Call this last, after your research, with the complete metadata.
-
-Standard agentic workflow:
-1. Call search_field_glossary with all field names.
-2. If glossary hits exist, incorporate them for cross-dataset consistency.
-3. Optionally call get_dataset_history for landscape context.
-4. Call generate_dataset_metadata with the final metadata."""
-
-MEMORY_TOOLS: list[Dict[str, Any]] = [
+_MEMORY_TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_field_glossary",
         "description": (
             "Search the enterprise field glossary for fields matching the given names. "
-            "Returns prior PII classification, sensitivity level, data type, and descriptions "
-            "from past metadata runs. Use this to enforce cross-dataset consistency."
+            "Returns prior PII classification, sensitivity level, data type, and descriptions. "
+            "Use to enforce cross-dataset consistency."
         ),
         "input_schema": {
             "type": "object",
@@ -106,25 +115,39 @@ MEMORY_TOOLS: list[Dict[str, Any]] = [
     },
     {
         "name": "get_dataset_history",
-        "description": (
-            "Retrieve summaries of previously catalogued datasets. "
-            "Use to understand the data landscape, identify related datasets, "
-            "and write richer business context."
-        ),
+        "description": "Retrieve summaries of previously catalogued datasets to understand the data landscape.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of datasets to return (default 10)",
-                    "default": 10,
-                }
+                "limit": {"type": "integer", "default": 10}
             },
         },
     },
 ]
 
-METADATA_TOOL: Dict[str, Any] = {
+_REGULATION_TOOL: dict[str, Any] = {
+    "name": "get_regulation_updates",
+    "description": (
+        "Fetch the latest regulatory guidance from official sources (BIS BCBS, ICO, FCA, EBA). "
+        "Call this when processing risk data, personal data, or any dataset that needs BCBS 239 "
+        "or GDPR compliance flags to ensure the most current rules are applied."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "frameworks": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["BCBS_239", "UK_GDPR", "FCA", "EBA"],
+                },
+                "description": "Frameworks to check for recent updates",
+            }
+        },
+    },
+}
+
+_METADATA_TOOL: dict[str, Any] = {
     "name": "generate_dataset_metadata",
     "description": "Generate comprehensive, banking-grade metadata for a dataset",
     "input_schema": {
@@ -135,14 +158,14 @@ METADATA_TOOL: Dict[str, Any] = {
             "fields", "compliance", "usage_guidance",
         ],
         "properties": {
-            "description": {"type": "string", "description": "Clear dataset description (2-3 sentences)"},
-            "business_context": {"type": "string", "description": "Business use, who uses it, how it fits the wider data landscape"},
+            "description": {"type": "string"},
+            "business_context": {"type": "string"},
             "data_domain": {"type": "string", "enum": [d.value for d in DataDomain]},
             "sub_domain": {"type": "string"},
             "classification": {"type": "string", "enum": [s.value for s in SensitivityLevel]},
-            "data_classification_rationale": {"type": "string", "description": "Why this classification level was chosen"},
-            "source_system": {"type": "string", "description": "Source system name if inferable"},
-            "usage_guidance": {"type": "string", "description": "How to use this dataset, access requirements, join guidance"},
+            "data_classification_rationale": {"type": "string"},
+            "source_system": {"type": "string"},
+            "usage_guidance": {"type": "string"},
             "known_limitations": {"type": "string"},
             "related_datasets": {"type": "array", "items": {"type": "string"}},
             "fields": {
@@ -155,11 +178,11 @@ METADATA_TOOL: Dict[str, Any] = {
                     ],
                     "properties": {
                         "name": {"type": "string"},
-                        "display_name": {"type": "string", "description": "Human-readable name"},
-                        "description": {"type": "string", "description": "Precise field description"},
+                        "display_name": {"type": "string"},
+                        "description": {"type": "string"},
                         "business_context": {"type": "string"},
                         "data_type": {"type": "string", "enum": [d.value for d in DataType]},
-                        "format": {"type": "string", "description": "e.g. ISO 8601, UUID v4, ISO 4217"},
+                        "format": {"type": "string"},
                         "is_pii": {"type": "boolean"},
                         "pii_type": {"type": "string", "enum": [p.value for p in PIIType]},
                         "sensitivity_level": {"type": "string", "enum": [s.value for s in SensitivityLevel]},
@@ -211,6 +234,7 @@ METADATA_TOOL: Dict[str, Any] = {
     },
 }
 
+# ── Helper functions ────────────────────────────────────────────────────────
 
 def _build_user_message(profile: DatasetProfile) -> str:
     if _MEMORY_OK:
@@ -219,7 +243,7 @@ def _build_user_message(profile: DatasetProfile) -> str:
             f"\n\nThe enterprise glossary contains {n} field definitions from past runs. "
             f"Call search_field_glossary with all {len(profile.fields)} field names now."
             if n > 0
-            else "\n\n(This is the first dataset. The enterprise glossary is empty — proceed directly to generate_dataset_metadata after the glossary check.)"
+            else "\n\n(Enterprise glossary is empty — check it first, then generate.)"
         )
     else:
         memory_hint = ""
@@ -233,16 +257,13 @@ For every field, write descriptions and business context that a data analyst can
 Apply BCBS 239 lineage and quality principles where appropriate."""
 
 
-def _parse_tool_result(raw: Dict[str, Any], dataset_name: str) -> DatasetMetadata:
-    """Convert the raw tool-use output dict into a validated DatasetMetadata."""
+def _parse_tool_result(raw: dict[str, Any], dataset_name: str) -> DatasetMetadata:
     fields = []
     for f in raw.get("fields", []):
         constraints_raw = f.get("constraints") or {}
         constraints = FieldConstraints(**{k: v for k, v in constraints_raw.items() if v is not None})
-
         pii_type_raw = f.get("pii_type")
         pii_type = PIIType(pii_type_raw) if pii_type_raw else None
-
         fields.append(
             FieldMetadata(
                 name=f["name"],
@@ -302,39 +323,62 @@ def _parse_tool_result(raw: Dict[str, Any], dataset_name: str) -> DatasetMetadat
     )
 
 
-def _dispatch_tool(name: str, inputs: dict) -> str:
-    """Execute a memory tool and return a JSON string result."""
-    if name == "search_field_glossary" and _MEMORY_OK:
-        results = search_glossary(inputs.get("field_names", []))
-        if not results:
-            return "No matching fields found in the enterprise glossary."
-        return json.dumps(results)
+# ── Agent class ─────────────────────────────────────────────────────────────
 
-    if name == "get_dataset_history" and _MEMORY_OK:
-        results = get_run_history(inputs.get("limit", 10))
-        if not results:
-            return "No previous datasets found in the catalogue."
-        return json.dumps(results)
+class MetadataAgent(BaseAgent):
+    """
+    Generates banking-grade metadata from a DatasetProfile.
 
-    return "Tool not available."
-
-
-class MetadataAgent:
-    """Agentic metadata generator. Call generate() to produce a DatasetMetadata."""
+    Agentic loop order:
+      search_field_glossary → get_regulation_updates → get_dataset_history
+      → generate_dataset_metadata
+    """
 
     def __init__(self, config: AgentConfig | None = None):
-        self.config = config or AgentConfig()
-        self.config.validate()
-        self.client = anthropic.Anthropic(api_key=self.config.api_key)
-        self._all_tools = MEMORY_TOOLS + [METADATA_TOOL] if _MEMORY_OK else [METADATA_TOOL]
+        super().__init__(config)
+        self._metadata_raw: dict | None = None
 
-    def generate(self, profile: DatasetProfile) -> tuple[DatasetMetadata, QualityScore]:
-        """
-        Agentic loop: Claude may call memory tools before generating metadata.
-        Returns (DatasetMetadata with quality_score populated, QualityScore).
-        """
+        tool_list = []
+        if _MEMORY_OK:
+            tool_list.extend(_MEMORY_TOOLS)
+        if _REGULATIONS_OK:
+            tool_list.append(_REGULATION_TOOL)
+        tool_list.append(_METADATA_TOOL)
+        self._tools = tool_list
+
+    @property
+    def system_prompt(self) -> str:
+        return _SYSTEM_PROMPT
+
+    @property
+    def tools(self) -> list[dict]:
+        return self._tools
+
+    def handle_tool_call(self, name: str, inputs: dict) -> str:
+        if name == "generate_dataset_metadata":
+            self._metadata_raw = inputs
+            return "Metadata accepted."
+
+        if name == "search_field_glossary" and _MEMORY_OK:
+            results = search_glossary(inputs.get("field_names", []))
+            return json.dumps(results) if results else "No matching fields in glossary."
+
+        if name == "get_dataset_history" and _MEMORY_OK:
+            results = get_run_history(inputs.get("limit", 10))
+            return json.dumps(results) if results else "No previous datasets found."
+
+        if name == "get_regulation_updates" and _REGULATIONS_OK:
+            return get_regulation_context(
+                frameworks=inputs.get("frameworks", []),
+                max_age_hours=24,
+            )
+
+        return "Tool not available."
+
+    def run(self, profile: DatasetProfile) -> tuple[DatasetMetadata, QualityScore]:
+        """Generate metadata, apply guardrails, run evals, persist to memory."""
+        self._metadata_raw = None
         messages = [{"role": "user", "content": _build_user_message(profile)}]
-        metadata_raw: dict | None = None
 
         for _turn in range(_MAX_TURNS):
             response = self.client.messages.create(
@@ -343,58 +387,42 @@ class MetadataAgent:
                 system=[
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT,
+                        "text": self.system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
                 messages=messages,
-                tools=self._all_tools,
+                tools=self.tools,
                 tool_choice={"type": "any"},
             )
 
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             if not tool_blocks:
-                raise RuntimeError("Agent turn produced no tool use. Check model response.")
+                raise RuntimeError("Agent turn produced no tool use.")
 
             messages.append({"role": "assistant", "content": response.content})
 
             tool_results = []
             for block in tool_blocks:
-                if block.name == "generate_dataset_metadata":
-                    metadata_raw = block.input
-                    result_content = "Metadata accepted."
-                else:
-                    result_content = _dispatch_tool(block.name, block.input)
-
+                result = self.handle_tool_call(block.name, block.input)
                 tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result_content,
-                    }
+                    {"type": "tool_result", "tool_use_id": block.id, "content": result}
                 )
-
             messages.append({"role": "user", "content": tool_results})
 
-            if metadata_raw is not None:
+            if self._metadata_raw is not None:
                 break
 
-        if metadata_raw is None:
-            raise RuntimeError(
-                f"Agent did not generate metadata within {_MAX_TURNS} turns."
-            )
+        if self._metadata_raw is None:
+            raise RuntimeError(f"Agent did not generate metadata within {_MAX_TURNS} turns.")
 
-        metadata_raw["dataset_name"] = profile.dataset_name
-        metadata = _parse_tool_result(metadata_raw, profile.dataset_name)
+        self._metadata_raw["dataset_name"] = profile.dataset_name
+        metadata = _parse_tool_result(self._metadata_raw, profile.dataset_name)
 
-        # Guardrails fix policy violations before scoring
         metadata, guardrail_messages = apply_all(metadata)
-
-        # Evals score the guardrailed output
         quality = run_evals(metadata, profile, guardrail_messages)
         metadata.quality_score = quality
 
-        # Persist to memory (non-fatal if it fails)
         if _MEMORY_OK:
             try:
                 store_run(metadata, quality)
@@ -402,3 +430,7 @@ class MetadataAgent:
                 pass
 
         return metadata, quality
+
+    # Backward-compat alias used by demo.py, watcher.py, app.py
+    def generate(self, profile: DatasetProfile) -> tuple[DatasetMetadata, QualityScore]:
+        return self.run(profile)

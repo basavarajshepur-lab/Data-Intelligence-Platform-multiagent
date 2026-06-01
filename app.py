@@ -27,7 +27,7 @@ st.set_page_config(
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.agent import MetadataAgent
+from src.agents import MetadataAgent
 from src.config import AgentConfig
 from src.exporters import export_csv, export_pdf, export_word
 from src.extractors import extract

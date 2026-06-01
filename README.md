@@ -208,13 +208,20 @@ Input sources
    Extractor ── statistical profiling, PII heuristics, values masked for PII fields
          │
          ▼
-   Agent memory ── search_field_glossary: look up prior definitions for consistency
-         │                get_dataset_history: understand the data landscape
-         ▼
-   Claude (agentic loop, max 6 turns)
-     1. search_field_glossary(all field names)   ← memory tool
-     2. [optional] get_dataset_history()          ← memory tool
-     3. generate_dataset_metadata(...)            ← structured output tool
+   MetadataAgent (src/agents/metadata_agent.py) — agentic loop, max 6 turns
+     │
+     ├─ Turn 1  search_field_glossary(all field names)
+     │          └─ SQLite glossary → prior PII/sensitivity for consistency
+     │
+     ├─ Turn 2  get_regulation_updates(frameworks)
+     │          └─ RSS fetch from BIS · ICO · FCA · EBA (24-hour cache)
+     │             Returns live guidance to sharpen compliance flags
+     │
+     ├─ Turn 3  [optional] get_dataset_history()
+     │          └─ Catalogue summary → populates related_datasets
+     │
+     └─ Turn 4  generate_dataset_metadata(...)
+                └─ Structured JSON output matching Pydantic schema
          │
          ▼
    Guardrails ── PII sensitivity floors enforced, dataset classification consistency
@@ -229,14 +236,49 @@ Input sources
          └── CLI (demo.py) ────────── Rich terminal output, YAML + JSON files
 ```
 
+### Real-time regulatory updates
+
+The agent calls `get_regulation_updates` during the agentic loop to fetch the latest guidance from official regulatory RSS feeds:
+
+| Source | Framework | What it monitors |
+|--------|-----------|-----------------|
+| BIS / Basel Committee | BCBS_239 | Risk data aggregation publications |
+| ICO | UK_GDPR | UK data protection guidance and enforcement notices |
+| FCA | FCA | Consumer data rules, financial crime, reporting standards |
+| EBA | EBA | Supervisory reporting, data standards |
+
+Results are cached in `outputs/memory.db` for 24 hours. Stale cache is auto-refreshed on the next agent call. The returned updates are passed directly into the Claude context so compliance flags, retention periods, and regulatory framework tags reflect current official guidance rather than training data.
+
+### Adding a new agent
+
+All agents live in `src/agents/` and extend `BaseAgent`:
+
+```python
+from src.agents.base import BaseAgent
+
+class MyNewAgent(BaseAgent):
+    @property
+    def system_prompt(self) -> str: ...
+
+    @property
+    def tools(self) -> list[dict]: ...
+
+    def handle_tool_call(self, name: str, inputs: dict) -> str: ...
+
+    def run(self, *args, **kwargs): ...
+```
+
+Two stubs are already provided as templates: `lineage_agent.py` (field-level SQL lineage) and `quality_agent.py` (DAMA-DMBOK quality profiling).
+
 ### Agent memory
 
-The agent uses a local SQLite database (`outputs/memory.db`) with two tables:
+The agent uses a local SQLite database (`outputs/memory.db`) with three tables:
 
 | Table | Contents | Purpose |
 |-------|----------|---------|
 | `runs` | Dataset name, domain, classification, field count, quality score, full metadata JSON | Run history shown in sidebar |
 | `field_glossary` | Per-field: name, PII type, sensitivity level, data type, description, source dataset | Consistency lookup on every new run |
+| `regulation_cache` | RSS items from BIS/ICO/FCA/EBA with headline, URL, summary, fetched timestamp | 24-hour regulation cache for the agent tool |
 
 On each generation, Claude first calls `search_field_glossary` with all field names from the new dataset. If a field like `account_number` was classified RESTRICTED in a previous run, that prior definition is included in the context so Claude applies the same classification — preventing drift across datasets.
 
@@ -322,14 +364,18 @@ metadata-agent/
 │   ├── interest_rate_curves.json  # Rate curve snapshot JSON Schema (scores ~72–80%)
 │   ├── system_access_log.sql      # 26-field system audit/access log DDL (scores ~70–76%)
 │   └── trade_confirmations.csv    # 30-field fixed income trade confirms (scores ~75–82%)
-├── outputs/                       # Generated metadata files (gitignored)
-│   └── memory.db                  # SQLite agent memory (gitignored)
+├── outputs/                       # Generated metadata + memory DB (gitignored)
+│   └── memory.db                  # SQLite: runs, field_glossary, regulation_cache
 └── src/
-    ├── agent.py                   # Claude agent — agentic loop, memory tools, prompt caching
-    ├── schema.py                  # Pydantic models — DatasetMetadata, FieldMetadata, etc.
-    ├── config.py                  # Banking constants: PII floors, eval thresholds, patterns
-    ├── memory/                    # Agent memory (SQLite)
-    │   └── memory_store.py        # store_run, search_glossary, get_run_history
+    ├── agents/                    # All agents — subclass BaseAgent to add new ones
+    │   ├── base.py                # BaseAgent ABC (system_prompt, tools, handle_tool_call, run)
+    │   ├── metadata_agent.py      # MetadataAgent — 4-tool agentic loop
+    │   ├── lineage_agent.py       # DataLineageAgent — stub (SQL field-level lineage)
+    │   └── quality_agent.py       # DataQualityAgent — stub (DAMA-DMBOK profiling)
+    ├── regulations/               # Real-time regulatory content
+    │   └── fetcher.py             # RSS fetch from BIS/ICO/FCA/EBA, 24-hour cache
+    ├── memory/                    # Persistent agent memory (SQLite)
+    │   └── memory_store.py        # store_run, search_glossary, regulation_cache helpers
     ├── connectors/                # External input sources
     │   ├── google_auth.py         # Shared OAuth2 for Gmail + Drive
     │   ├── gmail_connector.py     # List emails with attachments, download files
@@ -349,10 +395,12 @@ metadata-agent/
     │   ├── type_validator.py
     │   ├── banking_standards.py
     │   └── sensitivity_consistency.py
-    └── exporters/                 # Download format generators
-        ├── csv_exporter.py        # Flat field inventory CSV
-        ├── pdf_exporter.py        # Structured PDF catalogue document (fpdf2)
-        └── word_exporter.py       # Editable Word document (python-docx)
+    ├── exporters/                 # Download format generators
+    │   ├── csv_exporter.py        # Flat field inventory CSV
+    │   ├── pdf_exporter.py        # Structured PDF catalogue document (fpdf2)
+    │   └── word_exporter.py       # Editable Word document (python-docx)
+    ├── schema.py                  # Pydantic models — DatasetMetadata, FieldMetadata, etc.
+    └── config.py                  # Banking constants: PII floors, eval thresholds, patterns
 ```
 
 ---
@@ -400,6 +448,8 @@ metadata-agent/
 
 **Add a new input connector** — implement `list_files()` and `download_file()` in `src/connectors/`, then add a tab in `app.py` that sets `st.session_state["_staged_bytes"]` and `st.session_state["_staged_name"]`.
 
+**Add a new agent** — subclass `BaseAgent` in `src/agents/`, implement `system_prompt`, `tools`, `handle_tool_call()`, and `run()`. See `lineage_agent.py` and `quality_agent.py` for documented stubs.
+
 **Connect to a data catalogue** — the YAML/JSON output follows a generic structure. Write a thin adapter that maps the fields to your catalogue's API (Collibra, Atlan, DataHub, Alation).
 
 ---
@@ -412,7 +462,8 @@ metadata-agent/
 | Web UI | `streamlit` | Upload, Gmail/Drive tabs, results tabs, download buttons |
 | Schema validation | `pydantic v2` | Type enforcement and model validation |
 | Data profiling | `pandas` | CSV statistical profiling and type inference |
-| Agent memory | `sqlite3` (stdlib) | Persistent field glossary and run history |
+| Agent memory | `sqlite3` (stdlib) | Field glossary, run history, regulation cache |
+| Live regulations | `urllib.request` + `xml.etree` (stdlib) | RSS fetch from BIS, ICO, FCA, EBA |
 | Google connectors | `google-api-python-client`, `google-auth-oauthlib` | Gmail and Drive read-only access |
 | PDF export | `fpdf2` | Structured PDF with field tables, PII register, quality report |
 | Word export | `python-docx` | Editable .docx with colour-coded sensitivity cells |

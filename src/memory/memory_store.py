@@ -18,6 +18,20 @@ def _conn() -> sqlite3.Connection:
 def _init() -> None:
     with _conn() as con:
         con.executescript("""
+            CREATE TABLE IF NOT EXISTS regulation_cache (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key   TEXT NOT NULL,
+                framework    TEXT,
+                item_id      TEXT NOT NULL,
+                headline     TEXT,
+                url          TEXT,
+                published_dt TEXT,
+                summary      TEXT,
+                fetched_at   TEXT DEFAULT (datetime('now')),
+                UNIQUE(source_key, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_rc_fw
+                ON regulation_cache(framework, fetched_at DESC);
             CREATE TABLE IF NOT EXISTS processed_sources (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_type   TEXT NOT NULL,
@@ -192,3 +206,75 @@ def mark_processed(source_type: str, source_id: str, filename: str, success: boo
                VALUES (?, ?, ?, ?)""",
             (source_type, source_id, filename, int(success)),
         )
+
+
+# ── Regulation cache ───────────────────────────────────────────────────────
+
+def cache_regulation_items(source_key: str, framework: str, items: list[dict]) -> None:
+    """Upsert a batch of RSS items into the regulation cache."""
+    _init()
+    with _conn() as con:
+        con.executemany(
+            """INSERT OR REPLACE INTO regulation_cache
+               (source_key, framework, item_id, headline, url, published_dt, summary)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    source_key,
+                    framework,
+                    item["item_id"],
+                    item.get("headline", ""),
+                    item.get("url", ""),
+                    item.get("published_dt", ""),
+                    item.get("summary", ""),
+                )
+                for item in items
+            ],
+        )
+
+
+def get_cached_regulations(
+    source_key: str | None = None,
+    frameworks: list[str] | None = None,
+    max_age_hours: int = 24,
+    limit: int = 20,
+) -> list[dict]:
+    """Return cached regulation items that are younger than max_age_hours."""
+    _init()
+    clauses = ["fetched_at >= datetime('now', ?)"]
+    params: list = [f"-{max_age_hours} hours"]
+
+    if source_key:
+        clauses.append("source_key = ?")
+        params.append(source_key)
+
+    if frameworks:
+        placeholders = ",".join("?" * len(frameworks))
+        clauses.append(f"framework IN ({placeholders})")
+        params.extend(frameworks)
+
+    where = " AND ".join(clauses)
+    params.append(limit)
+
+    with _conn() as con:
+        rows = con.execute(
+            f"""SELECT source_key, framework, headline, url, published_dt, summary, fetched_at
+                FROM regulation_cache
+                WHERE {where}
+                ORDER BY framework, fetched_at DESC
+                LIMIT ?""",
+            params,
+        ).fetchall()
+
+    return [
+        {
+            "source_key": r[0],
+            "framework": r[1],
+            "headline": r[2],
+            "url": r[3],
+            "published_dt": r[4],
+            "summary": r[5],
+            "fetched_at": r[6],
+        }
+        for r in rows
+    ]

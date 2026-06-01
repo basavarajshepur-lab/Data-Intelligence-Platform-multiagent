@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.agent import MetadataAgent
+from src.agents import MetadataAgent
 from src.config import AgentConfig
 from src.extractors import extract
 from src.memory.memory_store import is_processed, mark_processed
