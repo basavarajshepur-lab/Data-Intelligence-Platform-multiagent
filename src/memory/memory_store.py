@@ -18,6 +18,17 @@ def _conn() -> sqlite3.Connection:
 def _init() -> None:
     with _conn() as con:
         con.executescript("""
+            CREATE TABLE IF NOT EXISTS processed_sources (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type   TEXT NOT NULL,
+                source_id     TEXT NOT NULL,
+                filename      TEXT,
+                success       INTEGER DEFAULT 1,
+                processed_at  TEXT DEFAULT (datetime('now')),
+                UNIQUE(source_type, source_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ps_lookup
+                ON processed_sources(source_type, source_id);
             CREATE TABLE IF NOT EXISTS runs (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 dataset_name  TEXT    NOT NULL,
@@ -158,3 +169,26 @@ def glossary_size() -> int:
     _init()
     with _conn() as con:
         return con.execute("SELECT COUNT(*) FROM field_glossary").fetchone()[0]
+
+
+def is_processed(source_type: str, source_id: str) -> bool:
+    """Return True if this source file has already been processed by the watcher."""
+    _init()
+    with _conn() as con:
+        row = con.execute(
+            "SELECT id FROM processed_sources WHERE source_type=? AND source_id=?",
+            (source_type, source_id),
+        ).fetchone()
+    return row is not None
+
+
+def mark_processed(source_type: str, source_id: str, filename: str, success: bool) -> None:
+    """Record that the watcher processed a file from an external source."""
+    _init()
+    with _conn() as con:
+        con.execute(
+            """INSERT OR REPLACE INTO processed_sources
+               (source_type, source_id, filename, success)
+               VALUES (?, ?, ?, ?)""",
+            (source_type, source_id, filename, int(success)),
+        )
