@@ -2,9 +2,14 @@
 .env
 *.env.local
 
+# Google OAuth credentials — never commit these
+credentials.json
+google_token.json
+
 # Generated outputs (don't commit generated metadata — it may contain sensitive field names)
 outputs/*.yaml
 outputs/*.json
+outputs/*.db
 
 # Python
 __pycache__/

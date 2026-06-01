@@ -1,6 +1,8 @@
 # Metadata Intelligence Agent
 
-An AI-powered metadata generation agent for global banking institutions. Upload a CSV dataset, JSON Schema, or SQL DDL — get a fully curated metadata catalogue entry in under two minutes, conforming to BCBS 239, UK GDPR, and enterprise data governance standards.
+An AI-powered, agentic metadata generation system for global banking institutions. Upload a CSV dataset, JSON Schema, or SQL DDL — or pull a file directly from Gmail or Google Drive — and get a fully curated metadata catalogue entry in under two minutes, conforming to BCBS 239, UK GDPR, and enterprise data governance standards.
+
+The agent maintains a persistent memory of every run. On each new dataset it searches the enterprise field glossary for matching field names, ensuring PII classification and sensitivity levels stay consistent across your entire data catalogue.
 
 Built as a portfolio project demonstrating the intersection of AI engineering and banking data governance.
 
@@ -30,20 +32,27 @@ Takes raw datasets or schemas as input. Returns structured metadata with:
 - **Regulatory flags** — GDPR applicability, lawful basis, retention period, cross-border transfer restrictions
 - **BCBS 239 compliance indicators** — data lineage, reconciliation keys, quality flags, source system traceability
 - **Quality score** — 5-dimension eval with a hard pass/fail gate before catalogue ingestion
+- **Cross-dataset consistency** — agent looks up prior definitions before generating, so `account_number` is always RESTRICTED across every dataset
 
 ---
 
 ## Web Interface
 
-Launch with `streamlit run app.py`. The UI has four sections.
+Launch with `streamlit run app.py`.
 
-### Upload and preview
+### Input — three ways to load a file
 
-Drop a file or click a sample dataset button. The extractor profiles it locally — no API call yet — and shows a field preview table with inferred types, null rates, and PII heuristic flags.
+| Tab | How it works |
+|-----|--------------|
+| **Upload File** | Drag-and-drop or browse for a local `.csv`, `.json`, or `.sql` file. Sample datasets included. |
+| **From Gmail** | Connect your Google account once; the tab lists every email in your inbox that has a CSV/JSON/SQL attachment. Click any attachment to process it. |
+| **From Google Drive** | Browses your Drive for supported files, newest first. Search by name. Click to download and process. |
+
+After selecting a file from any tab, the extractor profiles it locally — no API call yet — and shows a field preview table with inferred types, null rates, and PII heuristic flags.
 
 > Suspected PII columns are **masked before any values leave your machine**. The Claude prompt only sees column names and statistics, never the actual values.
 
-Click **Generate Metadata** to send the profile to Claude. A spinner shows progress (typically 30–90 seconds depending on file size and model).
+Click **Generate Metadata** to send the profile to Claude.
 
 ### Results tabs
 
@@ -57,8 +66,6 @@ Click **Generate Metadata** to send the profile to Claude. A spinner shows progr
 
 ### Download formats
 
-Four export formats available after generation:
-
 | Format | Best for | Contents |
 |--------|----------|----------|
 | **CSV** | Data catalogue ingestion, Excel review | Flat field inventory with all metadata columns, dataset header block |
@@ -70,7 +77,32 @@ Four export formats available after generation:
 
 - Enter your **Anthropic API key** (or set `ANTHROPIC_API_KEY` in `.env`)
 - Select **model**: Sonnet 4.6 (recommended), Haiku 4.5 (faster/cheaper), Opus 4.7 (most capable)
+- **Run History** — last 6 datasets processed, with domain, field count, and quality score at a glance
 - After a run: quick stats panel and a clear/reset button
+
+---
+
+## Connecting Gmail and Google Drive
+
+### One-time setup
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project
+2. Enable **Gmail API** and **Google Drive API**
+3. Go to **APIs & Services → OAuth consent screen** → External → add yourself as a test user
+4. Go to **APIs & Services → Credentials → Create OAuth client ID** → type: **Desktop App**
+5. Download the credentials file and rename it `credentials.json`
+
+### Connecting in the app
+
+1. Open the app → **From Gmail** tab
+2. Upload `credentials.json` when prompted
+3. Click **Authorize Gmail & Drive** — your browser opens for Google sign-in
+4. Sign in and grant read-only access
+5. Click **Done / Refresh** — both Gmail and Drive tabs are now active
+
+The agent only requests **read-only** scopes (`gmail.readonly`, `drive.readonly`). It cannot send emails or modify files.
+
+> If Google shows an "app not verified" warning, click **Advanced → Go to metadata-agent (unsafe)**. This is expected for apps in test mode that haven't gone through Google's review process.
 
 ---
 
@@ -100,28 +132,50 @@ The CLI writes `{dataset}_metadata.yaml` and `{dataset}_metadata.json` to the ou
 ## Architecture
 
 ```
-Input (CSV / JSON Schema / SQL DDL)
-    │
-    ▼
-Extractor ─── statistical profiling, PII heuristics, values masked for PII fields
-    │
-    ▼
-Claude Agent ─ tool-use structured output, system prompt cached (~90% token saving)
-    │
-    ▼
-Guardrails ─── PII sensitivity floors enforced, dataset classification consistency
-    │
-    ▼
-Evals ──────── 5-dimension quality scoring, BCBS 239 + GDPR checks, pass/fail gate
-    │
-    ├── Web UI (Streamlit) ────── interactive results, 5 tabs, 4 download formats
-    │
-    └── CLI (demo.py) ────────── Rich terminal output, YAML + JSON files
+Input sources
+  ├── File upload (local)
+  ├── Gmail attachment
+  └── Google Drive file
+         │
+         ▼
+   Extractor ── statistical profiling, PII heuristics, values masked for PII fields
+         │
+         ▼
+   Agent memory ── search_field_glossary: look up prior definitions for consistency
+         │                get_dataset_history: understand the data landscape
+         ▼
+   Claude (agentic loop, max 6 turns)
+     1. search_field_glossary(all field names)   ← memory tool
+     2. [optional] get_dataset_history()          ← memory tool
+     3. generate_dataset_metadata(...)            ← structured output tool
+         │
+         ▼
+   Guardrails ── PII sensitivity floors enforced, dataset classification consistency
+         │
+         ▼
+   Evals ─────── 5-dimension quality scoring, BCBS 239 + GDPR checks, pass/fail gate
+         │
+         ▼
+   Memory store ── persist run + field glossary to SQLite (outputs/memory.db)
+         │
+         ├── Web UI (Streamlit) ────── interactive results, 5 tabs, 4 download formats
+         └── CLI (demo.py) ────────── Rich terminal output, YAML + JSON files
 ```
+
+### Agent memory
+
+The agent uses a local SQLite database (`outputs/memory.db`) with two tables:
+
+| Table | Contents | Purpose |
+|-------|----------|---------|
+| `runs` | Dataset name, domain, classification, field count, quality score, full metadata JSON | Run history shown in sidebar |
+| `field_glossary` | Per-field: name, PII type, sensitivity level, data type, description, source dataset | Consistency lookup on every new run |
+
+On each generation, Claude first calls `search_field_glossary` with all field names from the new dataset. If a field like `account_number` was classified RESTRICTED in a previous run, that prior definition is included in the context so Claude applies the same classification — preventing drift across datasets.
 
 ### Guardrails (pre-eval enforcement)
 
-Guardrails run before evals so the quality score reflects the corrected output, not the raw AI output.
+Guardrails run before evals so the quality score reflects the corrected output.
 
 | Guardrail | Rule |
 |-----------|------|
@@ -186,7 +240,7 @@ Overall gate: **75/100 weighted average**. Sensitivity consistency is non-negoti
 
 ```
 metadata-agent/
-├── app.py                         # Streamlit web UI
+├── app.py                         # Streamlit web UI (primary entry point)
 ├── demo.py                        # CLI entry point
 ├── requirements.txt
 ├── .env.example                   # API key template
@@ -197,10 +251,17 @@ metadata-agent/
 │   ├── transaction_schema.json    # 26-field payment transaction JSON Schema
 │   └── risk_positions.sql         # 42-field trading book risk positions DDL
 ├── outputs/                       # Generated metadata files (gitignored)
+│   └── memory.db                  # SQLite agent memory (gitignored)
 └── src/
-    ├── agent.py                   # Claude API integration (tool use, prompt caching)
+    ├── agent.py                   # Claude agent — agentic loop, memory tools, prompt caching
     ├── schema.py                  # Pydantic models — DatasetMetadata, FieldMetadata, etc.
     ├── config.py                  # Banking constants: PII floors, eval thresholds, patterns
+    ├── memory/                    # Agent memory (SQLite)
+    │   └── memory_store.py        # store_run, search_glossary, get_run_history
+    ├── connectors/                # External input sources
+    │   ├── google_auth.py         # Shared OAuth2 for Gmail + Drive
+    │   ├── gmail_connector.py     # List emails with attachments, download files
+    │   └── drive_connector.py     # List and download Drive files
     ├── extractors/                # Input parsers
     │   ├── base.py                # DatasetProfile and FieldProfile dataclasses
     │   ├── csv_extractor.py
@@ -226,15 +287,19 @@ metadata-agent/
 
 ## Design decisions
 
-**Why tool use instead of prompt-to-text?** `tool_choice: {type: tool}` forces Claude to return valid JSON matching the Pydantic schema every time. No text parsing, no regex extraction from prose, no malformed output.
+**Agentic loop instead of forced single call.** The agent now runs a multi-turn loop (max 6 turns). On the first turn Claude calls `search_field_glossary` to check prior definitions, optionally calls `get_dataset_history` for landscape context, then calls `generate_dataset_metadata` with a fully informed response. `tool_choice: any` ensures a tool is always used, preventing open-ended text responses.
 
-**Why guardrails before evals?** Guardrails fix known policy violations (e.g. a card number field classified CONFIDENTIAL instead of SECRET). Evals then score the already-corrected output. This separates enforcement from measurement — you know your policy is met before you even look at the score.
+**Memory for cross-dataset consistency.** Without memory, the same field `account_number` might be classified RESTRICTED in one run and CONFIDENTIAL in another. The SQLite glossary gives Claude the prior classification as explicit context, making consistency measurable and automatic.
 
-**Why prompt caching?** The system prompt encodes ~1,200 tokens of banking standards context (BCBS 239, GDPR rules, PII taxonomy). Caching it with `cache_control: ephemeral` cuts input token cost by ~90% across repeated runs on a dataset catalogue.
+**Why tool use instead of prompt-to-text?** `tool_choice` forces Claude to return valid JSON matching the Pydantic schema every time. No text parsing, no regex extraction from prose, no malformed output.
 
-**Why mask PII in the extractor?** The extractor runs before any API call. Column names that match PII heuristics (email, account_number, sort_code, etc.) trigger value masking so actual data never appears in the Claude prompt. This reduces data leakage exposure even if an API call were intercepted or logged.
+**Why guardrails before evals?** Guardrails fix known policy violations (e.g. a card number field classified CONFIDENTIAL instead of SECRET). Evals then score the already-corrected output. This separates enforcement from measurement — the policy is guaranteed met before scoring begins.
 
-**Why Word and PDF exports?** In banking, metadata approval is a formal governance step. Data stewards need an editable document they can annotate and sign off. PDF is for the read-only record. YAML is for the downstream catalogue API.
+**Why prompt caching?** The system prompt encodes ~1,200 tokens of banking standards context (BCBS 239, GDPR rules, PII taxonomy). Caching it with `cache_control: ephemeral` cuts input token cost by ~90% across repeated runs.
+
+**Why mask PII in the extractor?** The extractor runs before any API call. Column names that match PII heuristics trigger value masking so actual data never appears in the Claude prompt — reducing exposure even if an API call were intercepted or logged.
+
+**Why read-only OAuth scopes?** The agent only needs to read files. `gmail.readonly` and `drive.readonly` are the minimum permissions. The agent cannot send emails, modify Drive files, or access any other Google service.
 
 ---
 
@@ -261,6 +326,8 @@ metadata-agent/
 
 **Add a new export format** — implement `export(metadata: DatasetMetadata) -> bytes` in `src/exporters/` and wire up a download button in `app.py`.
 
+**Add a new input connector** — implement `list_files()` and `download_file()` in `src/connectors/`, then add a tab in `app.py` that sets `st.session_state["_staged_bytes"]` and `st.session_state["_staged_name"]`.
+
 **Connect to a data catalogue** — the YAML/JSON output follows a generic structure. Write a thin adapter that maps the fields to your catalogue's API (Collibra, Atlan, DataHub, Alation).
 
 ---
@@ -269,10 +336,12 @@ metadata-agent/
 
 | Component | Library | Purpose |
 |-----------|---------|---------|
-| AI agent | `anthropic` | Structured metadata generation via tool use with prompt caching |
-| Web UI | `streamlit` | Upload, results tabs, download buttons |
+| AI agent | `anthropic` | Agentic loop with memory tools, structured output via tool use, prompt caching |
+| Web UI | `streamlit` | Upload, Gmail/Drive tabs, results tabs, download buttons |
 | Schema validation | `pydantic v2` | Type enforcement and model validation |
 | Data profiling | `pandas` | CSV statistical profiling and type inference |
+| Agent memory | `sqlite3` (stdlib) | Persistent field glossary and run history |
+| Google connectors | `google-api-python-client`, `google-auth-oauthlib` | Gmail and Drive read-only access |
 | PDF export | `fpdf2` | Structured PDF with field tables, PII register, quality report |
 | Word export | `python-docx` | Editable .docx with colour-coded sensitivity cells |
 | YAML output | `pyyaml` | Human-readable metadata files |
@@ -287,7 +356,7 @@ Built by a Senior Product Owner with 19 years in banking data and AI, currently 
 
 The same agent pattern can be extended to:
 - Automated data lineage documentation from SQL query logs
-- Data contract generation from microservice APIs  
+- Data contract generation from microservice APIs
 - Regulatory reporting field mapping (COREP, FINREP, AnaCredit)
 - Data quality rule generation from business constraints
 - DORA-compliant critical data element cataloguing

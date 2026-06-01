@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,29 @@ from src.config import AgentConfig
 from src.exporters import export_csv, export_pdf, export_word
 from src.extractors import extract
 from src.schema import DatasetMetadata, QualityScore, SensitivityLevel
+
+try:
+    from src.memory.memory_store import get_run_history
+    _MEMORY_OK = True
+except Exception:
+    _MEMORY_OK = False
+    get_run_history = lambda limit=5: []  # noqa: E731
+
+try:
+    from src.connectors.google_auth import (
+        credentials_file_exists,
+        is_authenticated,
+        start_auth_thread,
+        revoke,
+    )
+    from src.connectors.gmail_connector import (
+        download_attachment as gmail_download,
+        list_emails_with_attachments,
+    )
+    from src.connectors.drive_connector import download_drive_file, list_drive_files
+    _GOOGLE_OK = True
+except ImportError:
+    _GOOGLE_OK = False
 
 # ── CSS ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -235,6 +259,29 @@ with st.sidebar:
                 st.session_state[k] = None
             st.rerun()
 
+    # ── Run history ────────────────────────────────────────────────────────
+    if _MEMORY_OK:
+        try:
+            history = get_run_history(limit=6)
+            if history:
+                st.markdown("### Run History")
+                for run in history:
+                    qs = run.get("quality_score")
+                    passed = run.get("quality_passed")
+                    score_str = f"{qs:.0f}" if qs is not None else "—"
+                    icon = "✅" if passed else ("❌" if passed is False else "—")
+                    date_str = (run.get("created_at") or "")[:10]
+                    st.markdown(
+                        f"**{run['dataset_name']}**  \n"
+                        f"`{run.get('data_domain','—')}` · {run.get('field_count',0)} fields "
+                        f"· {icon} {score_str}  \n"
+                        f"<small style='color:#94A3B8'>{date_str}</small>",
+                        unsafe_allow_html=True,
+                    )
+                st.divider()
+        except Exception:
+            pass
+
     st.markdown("### About")
     st.markdown(
         """
@@ -275,44 +322,185 @@ if st.session_state.metadata is None:
             icon="🔑",
         )
 
-    col_upload, col_sample = st.columns([3, 1], gap="large")
+    # ── Input source tabs ──────────────────────────────────────────────────
+    tab_upload, tab_gmail, tab_drive = st.tabs([
+        "📁 Upload File", "📧 From Gmail", "☁️ From Google Drive",
+    ])
 
-    with col_upload:
-        st.markdown('<p class="section-label">Upload your dataset or schema</p>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(
-            "Drag and drop or browse",
-            type=["csv", "json", "sql", "ddl"],
-            label_visibility="collapsed",
-            help="CSV datasets, JSON Schemas, or SQL DDL files up to 50 MB",
-        )
+    # ── Tab 1: Upload / sample ──────────────────────────────────────────────
+    with tab_upload:
+        col_upload, col_sample = st.columns([3, 1], gap="large")
 
-    with col_sample:
-        st.markdown('<p class="section-label">Or try a sample</p>', unsafe_allow_html=True)
-        for label, path in SAMPLE_FILES.items():
-            if st.button(label, use_container_width=True, key=f"sample_{label}"):
-                with open(path, "rb") as f:
-                    data = f.read()
-                new_name = Path(path).name
-                # Reset profile only when switching to a different file
-                if new_name != st.session_state["_staged_name"]:
+        with col_upload:
+            st.markdown('<p class="section-label">Upload your dataset or schema</p>', unsafe_allow_html=True)
+            uploaded = st.file_uploader(
+                "Drag and drop or browse",
+                type=["csv", "json", "sql", "ddl"],
+                label_visibility="collapsed",
+                help="CSV datasets, JSON Schemas, or SQL DDL files up to 50 MB",
+            )
+            if uploaded is not None:
+                fb = uploaded.getvalue()
+                fn = getattr(uploaded, "name", "upload")
+                if fn != st.session_state["_staged_name"]:
                     st.session_state["profile"] = None
-                st.session_state["_staged_bytes"] = data
-                st.session_state["_staged_name"] = new_name
+                st.session_state["_staged_bytes"] = fb
+                st.session_state["_staged_name"] = fn
 
-    # ── Resolve file source ─────────────────────────────────────────────────
-    # Prefer a freshly uploaded file; fall back to bytes staged in session state
-    # (staged bytes survive the Generate-click rerun where file_uploader may return None)
-    if uploaded is not None:
-        # Use getvalue() — avoids cursor exhaustion on repeated reruns
-        file_bytes = uploaded.getvalue()
-        filename = getattr(uploaded, "name", "upload")
-        if filename != st.session_state["_staged_name"]:
-            st.session_state["profile"] = None  # new file — force re-extraction
-        st.session_state["_staged_bytes"] = file_bytes
-        st.session_state["_staged_name"] = filename
-    else:
-        file_bytes = st.session_state["_staged_bytes"]
-        filename = st.session_state["_staged_name"]
+        with col_sample:
+            st.markdown('<p class="section-label">Or try a sample</p>', unsafe_allow_html=True)
+            for label, path in SAMPLE_FILES.items():
+                if st.button(label, use_container_width=True, key=f"sample_{label}"):
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    new_name = Path(path).name
+                    if new_name != st.session_state["_staged_name"]:
+                        st.session_state["profile"] = None
+                    st.session_state["_staged_bytes"] = data
+                    st.session_state["_staged_name"] = new_name
+
+    # ── Tab 2: Gmail ────────────────────────────────────────────────────────
+    with tab_gmail:
+        if not _GOOGLE_OK:
+            st.info(
+                "Google API libraries not installed. Run:\n\n"
+                "```\npip install google-api-python-client google-auth-httplib2 google-auth-oauthlib\n```"
+            )
+        elif not credentials_file_exists():
+            st.markdown("#### Connect Gmail")
+            st.markdown(
+                "To access Gmail attachments you need a Google Cloud credentials file.\n\n"
+                "1. Go to [console.cloud.google.com](https://console.cloud.google.com)\n"
+                "2. Create a project → Enable **Gmail API** and **Drive API**\n"
+                "3. Create **OAuth 2.0 credentials** (type: *Desktop App*)\n"
+                "4. Download `credentials.json` and upload it below"
+            )
+            cred_upload = st.file_uploader(
+                "Upload credentials.json", type="json", key="cred_upload"
+            )
+            if cred_upload is not None:
+                Path("credentials.json").write_bytes(cred_upload.getvalue())
+                st.success("credentials.json saved. Click **Authorize** to connect.")
+                st.rerun()
+        elif not is_authenticated():
+            st.markdown("#### Authorize Google Account")
+            st.markdown(
+                "Click the button below. Your browser will open for Google authorization. "
+                "After approving, click **Done**."
+            )
+            if st.button("🔑 Authorize Gmail & Drive", key="btn_auth_google"):
+                status = start_auth_thread(port=8502)
+                st.session_state["_google_auth"] = status
+            if "_google_auth" in st.session_state:
+                status = st.session_state["_google_auth"]
+                if status.get("done"):
+                    if status.get("error"):
+                        st.error(f"Authorization failed: {status['error']}")
+                    else:
+                        del st.session_state["_google_auth"]
+                        st.success("Google account connected!")
+                        st.rerun()
+                else:
+                    st.info("Complete authorization in your browser, then click **Done**.")
+                    if st.button("Done / Refresh", key="btn_google_done"):
+                        st.rerun()
+        else:
+            # Connected — list emails with attachments
+            gcol1, gcol2 = st.columns([4, 1])
+            gcol1.markdown("#### Gmail — Emails with attachments")
+            if gcol2.button("Disconnect", key="btn_google_revoke"):
+                revoke()
+                st.rerun()
+
+            with st.spinner("Loading emails..."):
+                try:
+                    emails = list_emails_with_attachments(max_results=20)
+                except Exception as exc:
+                    st.error(f"Could not load emails: {exc}")
+                    emails = []
+
+            if not emails:
+                st.info("No emails with CSV / JSON / SQL attachments found.")
+            else:
+                st.markdown(f"Found **{len(emails)}** emails with supported attachments.")
+                for email in emails:
+                    label = f"📧 {email['subject'][:60]}  —  {email['sender'][:40]}"
+                    with st.expander(label, expanded=False):
+                        st.markdown(f"**Date:** {email['date']}")
+                        for att in email["attachments"]:
+                            size_kb = att["size_bytes"] // 1024
+                            btn_label = f"⬇ Process  {att['filename']}  ({size_kb} KB)"
+                            if st.button(btn_label, key=f"gmail_{email['message_id']}_{att['filename']}"):
+                                with st.spinner(f"Downloading {att['filename']}…"):
+                                    try:
+                                        tmp = gmail_download(
+                                            email["message_id"],
+                                            att["attachment_id"],
+                                            att["filename"],
+                                        )
+                                        with open(tmp, "rb") as fh:
+                                            raw = fh.read()
+                                        os.unlink(tmp)
+                                        if att["filename"] != st.session_state["_staged_name"]:
+                                            st.session_state["profile"] = None
+                                        st.session_state["_staged_bytes"] = raw
+                                        st.session_state["_staged_name"] = att["filename"]
+                                        st.rerun()
+                                    except Exception as exc:
+                                        st.error(f"Download failed: {exc}")
+
+    # ── Tab 3: Google Drive ─────────────────────────────────────────────────
+    with tab_drive:
+        if not _GOOGLE_OK:
+            st.info(
+                "Google API libraries not installed. Run:\n\n"
+                "```\npip install google-api-python-client google-auth-httplib2 google-auth-oauthlib\n```"
+            )
+        elif not credentials_file_exists():
+            st.info("Upload `credentials.json` in the Gmail tab first.")
+        elif not is_authenticated():
+            st.info("Authorize your Google account in the Gmail tab first.")
+        else:
+            dcol1, dcol2 = st.columns([4, 1])
+            dcol1.markdown("#### Google Drive — Supported files")
+            search_term = dcol2.text_input("Search", placeholder="filter by name", key="drive_search")
+
+            with st.spinner("Loading Drive files..."):
+                try:
+                    drive_files = list_drive_files(max_results=50)
+                except Exception as exc:
+                    st.error(f"Could not load Drive files: {exc}")
+                    drive_files = []
+
+            if search_term:
+                drive_files = [f for f in drive_files if search_term.lower() in f["name"].lower()]
+
+            if not drive_files:
+                st.info("No CSV / JSON / SQL files found in your Drive.")
+            else:
+                st.markdown(f"Found **{len(drive_files)}** files.")
+                for df_item in drive_files:
+                    size_kb = df_item.get("size_bytes", 0) // 1024
+                    mod = (df_item.get("modified") or "")[:10]
+                    btn_lbl = f"⬇ {df_item['name']}  ({size_kb} KB · {mod})"
+                    if st.button(btn_lbl, key=f"drive_{df_item['id']}"):
+                        with st.spinner(f"Downloading {df_item['name']}…"):
+                            try:
+                                tmp = download_drive_file(df_item["id"], df_item["name"])
+                                with open(tmp, "rb") as fh:
+                                    raw = fh.read()
+                                os.unlink(tmp)
+                                if df_item["name"] != st.session_state["_staged_name"]:
+                                    st.session_state["profile"] = None
+                                st.session_state["_staged_bytes"] = raw
+                                st.session_state["_staged_name"] = df_item["name"]
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Download failed: {exc}")
+
+    # ── Read staged file (set by any of the three tabs above) ──────────────
+    file_bytes = st.session_state["_staged_bytes"]
+    filename = st.session_state["_staged_name"]
 
     # ── Extract profile if not already done for this file ───────────────────
     if file_bytes and st.session_state["profile"] is None:
