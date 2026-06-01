@@ -1,8 +1,8 @@
-# Metadata Intelligence Agent
+# Metadata Intelligence Platform
 
-An AI-powered, agentic metadata generation system for global banking institutions. Upload a CSV dataset, JSON Schema, or SQL DDL — or pull a file directly from Gmail or Google Drive — and get a fully curated metadata catalogue entry in under two minutes, conforming to BCBS 239, UK GDPR, and enterprise data governance standards.
+An AI-powered, multi-agent data governance platform for global banking institutions. Three specialised Claude agents — **Metadata**, **Lineage**, and **Data Quality** — work together to automate the most time-consuming parts of data governance: cataloguing datasets, mapping field-level lineage, and profiling data quality.
 
-The agent maintains a persistent memory of every run. On each new dataset it searches the enterprise field glossary for matching field names, ensuring PII classification and sensitivity levels stay consistent across your entire data catalogue.
+All agents are driven by editable markdown files in `agents/`, maintain a persistent SQLite memory, fetch live regulatory updates from BIS/ICO/FCA/EBA, and can receive files from a local upload, Gmail attachment, or Google Drive.
 
 Built as a portfolio project demonstrating the intersection of AI engineering and banking data governance.
 
@@ -11,47 +11,236 @@ Built as a portfolio project demonstrating the intersection of AI engineering an
 ## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/metadata-agent.git
+git clone https://github.com/basavarajshepur-lab/metadata-agent.git
 cd metadata-agent
 pip install -r requirements.txt
-cp .env.example .env          # add your ANTHROPIC_API_KEY
-streamlit run app.py          # opens at http://localhost:8501
+cp .env.example .env          # add ANTHROPIC_API_KEY
+streamlit run app.py          # web UI at http://localhost:8501
 ```
 
 ---
 
-## What it does
+## The three agents
 
-Takes raw datasets or schemas as input. Returns structured metadata with:
-
-- **Field-level definitions** — precise business descriptions a data analyst can act on immediately
-- **Data types and constraints** — inferred from actual data or schema definitions
-- **PII classification** — identifies name, email, account numbers, sort codes, IBANs, NI numbers, card numbers, and 14 other PII types with exact PII type labelling
-- **Sensitivity levels** — PUBLIC / INTERNAL / CONFIDENTIAL / RESTRICTED / SECRET, aligned with bank data classification policy
-- **Usage guidance** — how to access, join, and handle the data, including non-prod masking requirements
-- **Regulatory flags** — GDPR applicability, lawful basis, retention period, cross-border transfer restrictions
-- **BCBS 239 compliance indicators** — data lineage, reconciliation keys, quality flags, source system traceability
-- **Quality score** — 5-dimension eval with a hard pass/fail gate before catalogue ingestion
-- **Cross-dataset consistency** — agent looks up prior definitions before generating, so `account_number` is always RESTRICTED across every dataset
+| Agent | Command | Input | Output | Standards |
+|-------|---------|-------|--------|-----------|
+| **Metadata** | `run_agent.py metadata` | CSV / JSON Schema / SQL DDL | Metadata catalogue entry — field descriptions, PII flags, sensitivity, compliance | BCBS 239, UK GDPR, DAMA-DMBOK |
+| **Lineage** | `run_agent.py lineage` | SQL SELECT file | Field-level lineage graph — source columns, transformations, BCBS 239 flags | BCBS 239 Principle 2 |
+| **Data Quality** | `run_agent.py quality` | CSV / JSON Schema / SQL DDL | DAMA-DMBOK quality report — 6 dimension scores, Great Expectations rules | DAMA-DMBOK, BCBS 239 Principles 3–6 |
 
 ---
 
-## Web Interface
+## Running the agents — CLI
 
-Launch with `streamlit run app.py`.
+Use `run_agent.py` to run any agent from the terminal.
+
+### List all agents
+
+```bash
+python run_agent.py list
+```
+
+Shows name, status, version, model, tool count, and description for every agent defined in `agents/`.
+
+---
+
+### Metadata Agent
+
+Generates a banking-grade metadata catalogue entry for any dataset.
+
+```bash
+# Basic usage
+python run_agent.py metadata samples/customer_accounts.csv
+python run_agent.py metadata samples/transaction_schema.json
+python run_agent.py metadata samples/risk_positions.sql
+
+# Custom output directory
+python run_agent.py metadata samples/trade_confirmations.csv --output outputs/
+
+# Faster / cheaper model
+python run_agent.py metadata samples/customer_accounts.csv --model claude-haiku-4-5-20251001
+```
+
+**Output files** written to `outputs/`:
+- `{dataset}_metadata.json` — machine-readable, for catalogue API ingestion
+- `{dataset}_metadata.yaml` — human-readable, for Git review and steward sign-off
+
+**What the agent does in the loop (up to 6 turns):**
+
+| Turn | Tool | What happens |
+|------|------|-------------|
+| 1 | `search_field_glossary` | Looks up prior PII/sensitivity for every field name — enforces cross-dataset consistency |
+| 2 | `get_regulation_updates` | Fetches live guidance from BIS, ICO, FCA, EBA — sharpens compliance flags |
+| 3 | `get_dataset_history` *(optional)* | Reads the catalogue landscape — populates `related_datasets` |
+| 4 | `generate_dataset_metadata` | Produces structured JSON matching the Pydantic schema |
+
+---
+
+### Lineage Agent
+
+Maps field-level data lineage from a SQL SELECT query. Conforms to BCBS 239 Principle 2.
+
+```bash
+# Map lineage from a SQL file
+python run_agent.py lineage samples/risk_positions.sql
+
+# Custom output directory
+python run_agent.py lineage my_transform.sql --output outputs/
+```
+
+**Input:** any `.sql` or `.ddl` file containing a SELECT statement.
+Supports all major SQL dialects: `ansi`, `postgres`, `oracle`, `mysql`, `bigquery`, `tsql`, `spark`, `duckdb`.
+
+**Output file** written to `outputs/`:
+- `{dataset}_lineage.json` — OpenLineage-compatible lineage graph
+
+**Example terminal output:**
+
+```
+Fields mapped:  12
+Source tables:  positions, risk_factors, market_data
+Unresolved:     0
+BCBS 239 compliant: YES
+
+Target Field          Type         Confidence  Sources
+──────────────────────────────────────────────────────────────────────
+position_id           direct       HIGH        positions.position_id
+market_value          aggregated   HIGH        positions.quantity · market_data.price
+delta_01              derived      HIGH        risk_factors.delta · positions.notional
+unrealised_pnl        derived      MEDIUM      positions.cost_basis · market_data.price
+```
+
+**What the agent does in the loop (up to 8 turns):**
+
+| Turn | Tool | What happens |
+|------|------|-------------|
+| 1 | `extract_sql_lineage` | `sqlglot` parses the SQL — returns source tables, output columns, expressions, lineage type (direct / derived / aggregated) |
+| 2 | `search_field_glossary` | Cross-references output column names against the enterprise catalogue |
+| 3 | `write_lineage_graph` | Claude writes enriched lineage with BCBS 239 compliance flags and descriptions |
+
+**Lineage types:**
+
+| Type | Meaning | Example |
+|------|---------|---------|
+| `direct` | Column copied unchanged | `SELECT customer_id` |
+| `derived` | Expression applied | `SELECT amount * fx_rate AS base_amount` |
+| `aggregated` | Aggregate function | `SELECT SUM(amount) AS total` |
+| `constant` | Hardcoded value | `SELECT 'GBP' AS ccy` |
+
+---
+
+### Data Quality Agent
+
+Profiles a dataset across all six DAMA-DMBOK quality dimensions and generates Great Expectations rules.
+
+```bash
+# Quality assessment on any supported file
+python run_agent.py quality samples/customer_accounts.csv
+python run_agent.py quality samples/kyc_screening_results.csv
+python run_agent.py quality samples/risk_positions.sql
+
+# Custom output directory
+python run_agent.py quality samples/collateral_register.csv --output outputs/
+```
+
+**Output file** written to `outputs/`:
+- `{dataset}_quality.json` — full quality report with dimension scores and GE expectations
+
+**Example terminal output:**
+
+```
+Overall score: 81.4/100  PASS
+
+DAMA Dimension    Score  Status  Top Issue
+──────────────────────────────────────────────────────────────────────
+Completeness        88   PASS    —
+Consistency         85   PASS    —
+Accuracy            79   PASS    credit_score range 300–850 not validated
+Timeliness          72   PASS    last_login has no freshness SLA defined
+Uniqueness          90   PASS    —
+Validity            74   PASS    kyc_status allows unexpected value 'legacy'
+
+Great Expectations rules generated: 34
+```
+
+**What the agent does in the loop (up to 8 turns):**
+
+| Turn | Tool | What happens |
+|------|------|-------------|
+| 1 | `get_field_statistics` | Returns null rates, unique counts, value ranges, derived quality flags from the dataset profile |
+| 2 | `write_quality_report` | Claude scores all 6 DAMA dimensions, generates GE expectations per field, writes recommendations |
+
+**DAMA-DMBOK dimensions assessed:**
+
+| Dimension | What is checked | BCBS 239 link |
+|-----------|----------------|---------------|
+| **Completeness** | Null rates, mandatory field population | Principle 4 |
+| **Consistency** | Cross-field rules, referential integrity | Principle 3 |
+| **Accuracy** | Range checks, pattern validation | Principle 3 |
+| **Timeliness** | Data freshness, processing lag | Principle 5 |
+| **Uniqueness** | Duplicate detection at key field level | Principle 3 |
+| **Validity** | Business rule conformance, allowed values | Principle 6 |
+
+---
+
+## Customising agent behaviour — markdown definitions
+
+Each agent is defined in a markdown file in `agents/`. **Edit these files to change agent behaviour without touching Python code.**
+
+```
+agents/
+├── metadata_agent.md    ← system prompt + YAML config
+├── lineage_agent.md     ← system prompt + YAML config
+└── quality_agent.md     ← system prompt + YAML config
+```
+
+**File format:**
+
+```markdown
+---
+name: lineage-agent
+model: claude-sonnet-4-6
+max_turns: 8
+tools:
+  - extract_sql_lineage
+  - search_field_glossary
+  - write_lineage_graph
+status: active
+---
+
+You are a data lineage specialist...
+(rest of file = system prompt sent verbatim to Claude)
+```
+
+**What you can change by editing a `.md` file:**
+
+| What you edit | Effect |
+|---|---|
+| The markdown body | Changes Claude's persona, priorities, and instructions |
+| `model:` | Switches to Haiku (faster/cheaper) or Opus (more capable) |
+| `max_turns:` | Controls how many tool calls Claude can make |
+| `tools:` list | Documents which tools this agent uses (for reference) |
+
+Changes take effect the next time you run the agent — no Python restart needed.
+
+---
+
+## Web Interface (Metadata Agent only)
+
+Launch with `streamlit run app.py`. The web UI runs the **Metadata Agent**.
 
 ### Input — three ways to load a file
 
 | Tab | How it works |
 |-----|--------------|
 | **Upload File** | Drag-and-drop or browse for a local `.csv`, `.json`, or `.sql` file. Sample datasets included. |
-| **From Gmail** | Connect your Google account once; the tab lists every email in your inbox that has a CSV/JSON/SQL attachment. Click any attachment to process it. |
+| **From Gmail** | Connect your Google account once; the tab lists every email with a CSV/JSON/SQL attachment. Click any attachment to process it. |
 | **From Google Drive** | Browses your Drive for supported files, newest first. Search by name. Click to download and process. |
 
-Eight sample datasets are included to try immediately:
+Eight sample datasets are included:
 
-| Sample file | Domain | Fields | Expected score |
-|-------------|--------|--------|----------------|
+| Sample file | Domain | Fields | Expected metadata score |
+|-------------|--------|--------|------------------------|
 | `customer_accounts.csv` | Retail banking | 18 | 88–95% |
 | `transaction_schema.json` | Payments | 26 | 88–95% |
 | `risk_positions.sql` | Market risk | 42 | 88–95% |
@@ -61,37 +250,26 @@ Eight sample datasets are included to try immediately:
 | `system_access_log.sql` | IT / audit | 26 | 70–76% |
 | `trade_confirmations.csv` | Fixed income trading | 30 | 75–82% |
 
-After selecting a file from any tab, the extractor profiles it locally — no API call yet — and shows a field preview table with inferred types, null rates, and PII heuristic flags.
-
-> Suspected PII columns are **masked before any values leave your machine**. The Claude prompt only sees column names and statistics, never the actual values.
-
-Click **Generate Metadata** to send the profile to Claude.
+> Suspected PII columns are **masked before any values leave your machine**. The Claude prompt only sees column names and statistics, never actual values.
 
 ### Results tabs
 
 | Tab | What it shows |
 |-----|---------------|
-| **Overview** | Dataset description, business context, usage guidance, PII summary, dataset classification details |
-| **Fields** | Full field inventory table — filterable by PII status, sensitivity level, or name search. Select any field for a full detail panel: constraints, lineage, business rules, guardrail notices |
-| **Quality Report** | Overall score (0–100) with pass/fail, dimension breakdown with progress bars, issues list, warnings list, guardrails applied |
-| **Compliance** | GDPR/UK GDPR flags, regulatory frameworks, retention period, data residency, PII field register colour-coded by sensitivity |
-| **Raw YAML** | Full metadata as syntax-highlighted YAML — copy button included |
+| **Overview** | Dataset description, business context, usage guidance, PII summary, classification details |
+| **Fields** | Full field inventory — filterable by PII status, sensitivity, or name. Select any field for a full detail panel |
+| **Quality Report** | 5-dimension eval score with pass/fail, issues, warnings, guardrails applied |
+| **Compliance** | GDPR/UK GDPR flags, regulatory frameworks, retention period, PII register |
+| **Raw YAML** | Full metadata as syntax-highlighted YAML |
 
 ### Download formats
 
-| Format | Best for | Contents |
-|--------|----------|----------|
-| **CSV** | Data catalogue ingestion, Excel review | Flat field inventory with all metadata columns, dataset header block |
-| **PDF** | Stakeholder review, governance documentation | Cover page, field table, PII register, compliance section, quality report |
-| **Word (.docx)** | Data steward annotation and sign-off | Full editable document with colour-coded sensitivity cells, all sections |
-| **YAML** | API ingestion (Collibra, Atlan, DataHub) | Machine-readable full metadata, same structure as local output files |
-
-### Sidebar
-
-- Enter your **Anthropic API key** (or set `ANTHROPIC_API_KEY` in `.env`)
-- Select **model**: Sonnet 4.6 (recommended), Haiku 4.5 (faster/cheaper), Opus 4.7 (most capable)
-- **Run History** — last 6 datasets processed, with domain, field count, and quality score at a glance
-- After a run: quick stats panel and a clear/reset button
+| Format | Best for |
+|--------|----------|
+| **CSV** | Data catalogue ingestion (Collibra, Atlan, DataHub), Excel review |
+| **PDF** | Stakeholder review and governance sign-off |
+| **Word (.docx)** | Data steward annotation and approval |
+| **YAML** | Machine-readable API ingestion |
 
 ---
 
@@ -101,98 +279,45 @@ Click **Generate Metadata** to send the profile to Claude.
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project
 2. Enable **Gmail API** and **Google Drive API**
-3. Go to **APIs & Services → OAuth consent screen** → External → add yourself as a test user
-4. Go to **APIs & Services → Credentials → Create OAuth client ID** → type: **Desktop App**
-5. Download the credentials file and rename it `credentials.json`
+3. **APIs & Services → OAuth consent screen** → External → add yourself as a test user
+4. **APIs & Services → Credentials → Create OAuth client ID** → type: Desktop App
+5. Download `credentials.json`
 
 ### Connecting in the app
 
-1. Open the app → **From Gmail** tab
-2. Upload `credentials.json` when prompted
-3. Click **Authorize Gmail & Drive** — your browser opens for Google sign-in
-4. Sign in and grant read-only access
-5. Click **Done / Refresh** — both Gmail and Drive tabs are now active
+1. Open the app → **From Gmail** tab → upload `credentials.json`
+2. Click **Authorize Gmail & Drive** — browser opens for Google sign-in
+3. Click **Done / Refresh** — both tabs activate
 
-The agent only requests **read-only** scopes (`gmail.readonly`, `drive.readonly`). It cannot send emails or modify files.
+The agent only requests **read-only** scopes. It cannot send emails or modify files.
 
-> If Google shows an "app not verified" warning, click **Advanced → Go to metadata-agent (unsafe)**. This is expected for apps in test mode that haven't gone through Google's review process.
+> If Google shows an "app not verified" warning, click **Advanced → Go to metadata-agent (unsafe)**. Expected for apps in test mode.
 
 ---
 
 ## Background watcher — automatic processing
 
-The watcher polls Gmail and Google Drive on a schedule and runs the metadata agent on any new attachments automatically, without you having to click anything in the UI.
-
-### Starting the watcher
-
-Open a **second terminal** alongside the Streamlit app and run:
+The watcher polls Gmail and Google Drive on a schedule and runs the **Metadata Agent** on any new attachments automatically.
 
 ```bash
-# Poll every 60 minutes, runs until Ctrl+C (default)
-python watcher.py
-
-# Poll every 30 minutes
-python watcher.py --interval 30
-
-# Poll once and exit — useful for testing or Task Scheduler
-python watcher.py --once
+python watcher.py                  # poll every 60 minutes
+python watcher.py --interval 30    # poll every 30 minutes
+python watcher.py --once           # single poll then exit
 ```
 
 Logs are printed to the terminal and saved to `outputs/watcher.log`.
 
-### How it works
+Files are never processed twice. Re-uploading a Drive file (new `modifiedTime`) triggers reprocessing.
 
-```
-Every hour:
-  Gmail → find emails with .csv / .json / .sql attachments
-         → skip files already recorded in processed_sources table
-         → download new ones → run metadata agent → save to memory DB
+### Windows Task Scheduler (run automatically)
 
-  Drive → list .csv / .json / .sql files, newest first
-         → skip already-processed (tracked by file ID + modifiedTime)
-         → re-uploaded files get a new modifiedTime, so are reprocessed
-         → download → run metadata agent → save to memory DB
-```
-
-Files are never processed twice. If you re-upload a Drive file or re-send an email with a corrected dataset, the watcher detects the change and reprocesses it automatically.
-
-### Run automatically with Windows Task Scheduler
-
-To have the watcher run even when you are not at your computer:
-
-1. Press **Win + R**, type `taskschd.msc`, press Enter
-2. Click **Create Basic Task** → name it `Metadata Agent Watcher`
-3. Trigger: **Daily** → check **Repeat task every: 1 hour**
+1. Press **Win + R** → `taskschd.msc`
+2. **Create Basic Task** → name: `Metadata Agent Watcher`
+3. Trigger: **Daily** → Repeat every **1 hour**
 4. Action: **Start a program**
    - Program: `python`
-   - Arguments: `"C:\Users\basav\OneDrive\Documents\Portfolio\metadata-agent\watcher.py" --once`
-   - Start in: `C:\Users\basav\OneDrive\Documents\Portfolio\metadata-agent`
-5. Click **Finish**
-
-Using `--once` with Task Scheduler is cleaner than a long-running process — the scheduler controls the timing and restarts the script if it crashes.
-
----
-
-## CLI (alternative to the web UI)
-
-```bash
-# Analyse a CSV dataset
-python demo.py samples/customer_accounts.csv
-
-# Analyse a JSON Schema
-python demo.py samples/transaction_schema.json
-
-# Analyse a SQL DDL
-python demo.py samples/risk_positions.sql
-
-# Custom output directory
-python demo.py samples/customer_accounts.csv --output-dir my_outputs/
-
-# Use a different model
-python demo.py samples/customer_accounts.csv --model claude-opus-4-7
-```
-
-The CLI writes `{dataset}_metadata.yaml` and `{dataset}_metadata.json` to the output directory and prints a quality report to the terminal using Rich.
+   - Arguments: `"C:\...\metadata-agent\watcher.py" --once`
+   - Start in: `C:\...\metadata-agent`
 
 ---
 
@@ -201,147 +326,88 @@ The CLI writes `{dataset}_metadata.yaml` and `{dataset}_metadata.json` to the ou
 ```
 Input sources
   ├── File upload (local)
-  ├── Gmail attachment
-  └── Google Drive file
+  ├── Gmail attachment           ┐
+  └── Google Drive file          ┘ connectors/
          │
          ▼
    Extractor ── statistical profiling, PII heuristics, values masked for PII fields
          │
-         ▼
-   MetadataAgent (src/agents/metadata_agent.py) — agentic loop, max 6 turns
-     │
-     ├─ Turn 1  search_field_glossary(all field names)
-     │          └─ SQLite glossary → prior PII/sensitivity for consistency
-     │
-     ├─ Turn 2  get_regulation_updates(frameworks)
-     │          └─ RSS fetch from BIS · ICO · FCA · EBA (24-hour cache)
-     │             Returns live guidance to sharpen compliance flags
-     │
-     ├─ Turn 3  [optional] get_dataset_history()
-     │          └─ Catalogue summary → populates related_datasets
-     │
-     └─ Turn 4  generate_dataset_metadata(...)
-                └─ Structured JSON output matching Pydantic schema
+         ├──────────────────────────────────────────────────────────┐
+         ▼                                                          ▼
+   MetadataAgent (metadata_agent.py)                  LineageAgent (lineage_agent.py)
+     Turn 1: search_field_glossary                     Turn 1: extract_sql_lineage (sqlglot)
+     Turn 2: get_regulation_updates (RSS)              Turn 2: search_field_glossary
+     Turn 3: get_dataset_history                       Turn 3: write_lineage_graph
+     Turn 4: generate_dataset_metadata                         │
+         │                                                     ▼
+         ▼                                             DatasetLineage
+   Guardrails + Evals                                 (BCBS 239 Principle 2)
          │
          ▼
-   Guardrails ── PII sensitivity floors enforced, dataset classification consistency
+   DataQualityAgent (quality_agent.py)
+     Turn 1: get_field_statistics
+     Turn 2: write_quality_report
          │
          ▼
-   Evals ─────── 5-dimension quality scoring, BCBS 239 + GDPR checks, pass/fail gate
-         │
-         ▼
-   Memory store ── persist run + field glossary to SQLite (outputs/memory.db)
-         │
-         ├── Web UI (Streamlit) ────── interactive results, 5 tabs, 4 download formats
-         └── CLI (demo.py) ────────── Rich terminal output, YAML + JSON files
+   DataQualityReport (DAMA-DMBOK 6 dimensions + GE expectations)
+
+All agents → Memory store (outputs/memory.db)
+         ├── Web UI (Streamlit) — metadata agent, 3 input tabs, 5 result tabs
+         └── CLI (run_agent.py) — all three agents
 ```
 
-### Real-time regulatory updates
+### Agent definitions (markdown-driven)
 
-The agent calls `get_regulation_updates` during the agentic loop to fetch the latest guidance from official regulatory RSS feeds:
+Each agent reads its system prompt and config from a markdown file:
 
-| Source | Framework | What it monitors |
-|--------|-----------|-----------------|
-| BIS / Basel Committee | BCBS_239 | Risk data aggregation publications |
-| ICO | UK_GDPR | UK data protection guidance and enforcement notices |
-| FCA | FCA | Consumer data rules, financial crime, reporting standards |
-| EBA | EBA | Supervisory reporting, data standards |
-
-Results are cached in `outputs/memory.db` for 24 hours. Stale cache is auto-refreshed on the next agent call. The returned updates are passed directly into the Claude context so compliance flags, retention periods, and regulatory framework tags reflect current official guidance rather than training data.
-
-### Adding a new agent
-
-All agents live in `src/agents/` and extend `BaseAgent`:
-
-```python
-from src.agents.base import BaseAgent
-
-class MyNewAgent(BaseAgent):
-    @property
-    def system_prompt(self) -> str: ...
-
-    @property
-    def tools(self) -> list[dict]: ...
-
-    def handle_tool_call(self, name: str, inputs: dict) -> str: ...
-
-    def run(self, *args, **kwargs): ...
+```
+agents/
+├── metadata_agent.md   status: active   tools: 4
+├── lineage_agent.md    status: active   tools: 3
+└── quality_agent.md    status: active   tools: 2
 ```
 
-Two stubs are already provided as templates: `lineage_agent.py` (field-level SQL lineage) and `quality_agent.py` (DAMA-DMBOK quality profiling).
+Edit the markdown to change agent behaviour. The Python classes handle tool execution only.
 
-### Agent memory
+### Real-time regulatory updates (Metadata Agent)
 
-The agent uses a local SQLite database (`outputs/memory.db`) with three tables:
+| Source | Framework | Feed |
+|--------|-----------|------|
+| BIS / Basel Committee | BCBS_239 | BIS BCBS RSS |
+| ICO | UK_GDPR | ICO news RSS |
+| FCA | FCA | FCA news RSS |
+| EBA | EBA | EBA RSS |
 
-| Table | Contents | Purpose |
-|-------|----------|---------|
-| `runs` | Dataset name, domain, classification, field count, quality score, full metadata JSON | Run history shown in sidebar |
-| `field_glossary` | Per-field: name, PII type, sensitivity level, data type, description, source dataset | Consistency lookup on every new run |
-| `regulation_cache` | RSS items from BIS/ICO/FCA/EBA with headline, URL, summary, fetched timestamp | 24-hour regulation cache for the agent tool |
+Cached in `regulation_cache` table for 24 hours. Auto-refreshed on next agent call.
 
-On each generation, Claude first calls `search_field_glossary` with all field names from the new dataset. If a field like `account_number` was classified RESTRICTED in a previous run, that prior definition is included in the context so Claude applies the same classification — preventing drift across datasets.
+### Agent memory (SQLite)
 
-### Guardrails (pre-eval enforcement)
+| Table | Contents |
+|-------|----------|
+| `runs` | Every metadata run — dataset name, domain, classification, quality score, full JSON |
+| `field_glossary` | Per-field definitions indexed by name — used for cross-dataset PII/sensitivity consistency |
+| `regulation_cache` | RSS items from BIS/ICO/FCA/EBA — 24-hour TTL |
+| `processed_sources` | Gmail/Drive files already processed by the watcher — prevents duplicate runs |
 
-Guardrails run before evals so the quality score reflects the corrected output.
+### Guardrails (Metadata Agent — pre-eval enforcement)
 
 | Guardrail | Rule |
 |-----------|------|
-| PII Sensitivity Floor | name/email/phone → CONFIDENTIAL min; account numbers/sort codes/IBANs → RESTRICTED; card numbers/CVVs → SECRET |
-| Dataset Classification | Dataset classification cannot be lower than the highest field sensitivity level |
-| PII Type Required | Any field with `is_pii: true` must have an explicit `pii_type` |
+| PII Sensitivity Floor | name/email/phone → CONFIDENTIAL min; account/sort/IBAN → RESTRICTED; card/CVV → SECRET |
+| Dataset Classification | Cannot be lower than the highest field sensitivity level |
+| PII Type Required | Any field with `is_pii: true` must carry a `pii_type` |
 
-### Eval dimensions
+### Metadata eval dimensions
 
-| Dimension | Weight | Pass threshold | What it checks |
-|-----------|--------|----------------|----------------|
-| Completeness | 30% | 70/100 | All required metadata fields populated with meaningful content |
-| PII Detection | 25% | 80/100 | AI PII flags vs column-name heuristics and extractor detection |
-| Type Consistency | 20% | 75/100 | Declared data types match what was inferred from actual data |
-| Banking Standards | 15% | 70/100 | BCBS 239 lineage, GDPR compliance fields, key field identification |
-| Sensitivity Consistency | 10% | 90/100 | Internal consistency of PII flags and sensitivity levels |
+| Dimension | Weight | Pass | What it checks |
+|-----------|--------|------|----------------|
+| Completeness | 30% | 70 | All metadata fields populated with meaningful content |
+| PII Detection | 25% | 80 | AI PII flags vs column-name heuristics |
+| Type Consistency | 20% | 75 | Declared types match inferred types |
+| Banking Standards | 15% | 70 | BCBS 239 lineage, GDPR fields, key field identification |
+| Sensitivity Consistency | 10% | 90 | PII sensitivity floors and internal consistency |
 
-Overall gate: **75/100 weighted average**. Sensitivity consistency is non-negotiable — a failure blocks the gate regardless of overall score.
-
----
-
-## Supported input formats
-
-| Format | Extension | Notes |
-|--------|-----------|-------|
-| CSV dataset | `.csv` | First 10,000 rows profiled; suspected PII columns masked before sampling |
-| JSON Schema | `.json` | Draft-07 and draft-2020-12 supported; nested objects flattened |
-| SQL DDL | `.sql` `.ddl` | PostgreSQL, Oracle, SQL Server, BigQuery dialects |
-
----
-
-## Example metadata output (single field)
-
-```yaml
-- name: national_insurance
-  display_name: National Insurance Number
-  description: UK National Insurance number uniquely identifying the individual for
-    tax and social security purposes. Format NI [A-Z]{2}[0-9]{6}[A-Z].
-  business_context: Collected for KYC/AML verification and HMRC tax reporting. Subject
-    to strict need-to-know access controls.
-  data_type: string
-  format: "[A-Z]{2}[0-9]{6}[A-Z]"
-  constraints:
-    nullable: true
-    unique: true
-    pattern: ^[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]$
-  is_pii: true
-  pii_type: national_id
-  sensitivity_level: restricted
-  is_key_field: false
-  usage_guidance: Access restricted to KYC and Compliance teams only. Never include
-    in analytics exports or dashboards. Mask in non-production environments. Audit
-    log all access.
-  business_rules: Must match HMRC format. Only collected after KYC onboarding completed.
-  data_lineage: Customer-provided during onboarding, validated against HMRC format regex
-  tags: [pii, restricted, kyc, regulatory, hmrc]
-```
+Overall gate: **75/100**. Sensitivity consistency failure blocks the gate regardless of overall score.
 
 ---
 
@@ -349,108 +415,164 @@ Overall gate: **75/100 weighted average**. Sensitivity consistency is non-negoti
 
 ```
 metadata-agent/
-├── app.py                         # Streamlit web UI (primary entry point)
-├── demo.py                        # CLI entry point
+├── app.py                         # Streamlit web UI (Metadata Agent)
+├── run_agent.py                   # Unified CLI — runs any agent by name
+├── demo.py                        # Legacy CLI for Metadata Agent only
+├── watcher.py                     # Background Gmail/Drive watcher
 ├── requirements.txt
-├── .env.example                   # API key template
-├── .streamlit/
-│   └── config.toml                # Navy/blue banking theme
-├── samples/
-│   ├── customer_accounts.csv      # 18-field retail banking customer dataset (scores ~88–95%)
-│   ├── transaction_schema.json    # 26-field payment transaction JSON Schema (scores ~88–95%)
-│   ├── risk_positions.sql         # 42-field trading book risk positions DDL (scores ~88–95%)
-│   ├── collateral_register.csv    # 25-field collateral management register (scores ~73–80%)
-│   ├── kyc_screening_results.csv  # 22-field AML/KYC screening results (scores ~70–78%)
-│   ├── interest_rate_curves.json  # Rate curve snapshot JSON Schema (scores ~72–80%)
-│   ├── system_access_log.sql      # 26-field system audit/access log DDL (scores ~70–76%)
-│   └── trade_confirmations.csv    # 30-field fixed income trade confirms (scores ~75–82%)
-├── outputs/                       # Generated metadata + memory DB (gitignored)
-│   └── memory.db                  # SQLite: runs, field_glossary, regulation_cache
+├── .env.example
+├── agents/                        # Agent definitions — edit these files
+│   ├── metadata_agent.md          # System prompt + config for MetadataAgent
+│   ├── lineage_agent.md           # System prompt + config for LineageAgent
+│   └── quality_agent.md           # System prompt + config for DataQualityAgent
+├── .streamlit/config.toml         # Navy/blue banking theme
+├── samples/                       # 8 example input files
+├── outputs/                       # Generated files + memory DB (gitignored)
+│   ├── memory.db                  # SQLite: runs, glossary, regulations, processed_sources
+│   └── watcher.log
 └── src/
-    ├── agents/                    # All agents — subclass BaseAgent to add new ones
-    │   ├── base.py                # BaseAgent ABC (system_prompt, tools, handle_tool_call, run)
-    │   ├── metadata_agent.py      # MetadataAgent — 4-tool agentic loop
-    │   ├── lineage_agent.py       # DataLineageAgent — stub (SQL field-level lineage)
-    │   └── quality_agent.py       # DataQualityAgent — stub (DAMA-DMBOK profiling)
-    ├── regulations/               # Real-time regulatory content
+    ├── agents/                    # Agent implementations
+    │   ├── base.py                # BaseAgent ABC — subclass to add new agents
+    │   ├── loader.py              # Reads agents/*.md at runtime
+    │   ├── metadata_agent.py      # MetadataAgent (4 tools)
+    │   ├── lineage_agent.py       # LineageAgent (3 tools, sqlglot)
+    │   ├── quality_agent.py       # DataQualityAgent (2 tools, DAMA-DMBOK)
+    │   └── tools/
+    │       ├── lineage_tools.py   # extract_sql_lineage + write_lineage_graph schemas/impls
+    │       └── quality_tools.py   # get_field_statistics + write_quality_report schemas/impls
+    ├── regulations/
     │   └── fetcher.py             # RSS fetch from BIS/ICO/FCA/EBA, 24-hour cache
-    ├── memory/                    # Persistent agent memory (SQLite)
-    │   └── memory_store.py        # store_run, search_glossary, regulation_cache helpers
-    ├── connectors/                # External input sources
-    │   ├── google_auth.py         # Shared OAuth2 for Gmail + Drive
-    │   ├── gmail_connector.py     # List emails with attachments, download files
-    │   └── drive_connector.py     # List and download Drive files
-    ├── extractors/                # Input parsers
-    │   ├── base.py                # DatasetProfile and FieldProfile dataclasses
+    ├── memory/
+    │   └── memory_store.py        # All SQLite helpers
+    ├── connectors/
+    │   ├── google_auth.py         # Shared OAuth2
+    │   ├── gmail_connector.py
+    │   └── drive_connector.py
+    ├── extractors/
+    │   ├── base.py                # DatasetProfile + FieldProfile dataclasses
     │   ├── csv_extractor.py
     │   ├── json_extractor.py
     │   └── sql_extractor.py
-    ├── guardrails/                # Policy enforcement (runs before evals)
-    │   ├── pii_guardrail.py       # PII sensitivity floor enforcement
+    ├── guardrails/
+    │   ├── pii_guardrail.py
     │   └── sensitivity_guardrail.py
-    ├── evals/                     # Quality scoring (runs after guardrails)
-    │   ├── eval_runner.py         # Orchestrates 5 dimensions, computes weighted score
+    ├── evals/
+    │   ├── eval_runner.py
     │   ├── completeness.py
     │   ├── pii_consistency.py
     │   ├── type_validator.py
     │   ├── banking_standards.py
     │   └── sensitivity_consistency.py
-    ├── exporters/                 # Download format generators
-    │   ├── csv_exporter.py        # Flat field inventory CSV
-    │   ├── pdf_exporter.py        # Structured PDF catalogue document (fpdf2)
-    │   └── word_exporter.py       # Editable Word document (python-docx)
-    ├── schema.py                  # Pydantic models — DatasetMetadata, FieldMetadata, etc.
-    └── config.py                  # Banking constants: PII floors, eval thresholds, patterns
+    ├── exporters/
+    │   ├── csv_exporter.py
+    │   ├── pdf_exporter.py
+    │   └── word_exporter.py
+    ├── schema.py                  # All Pydantic models — metadata, lineage, quality
+    └── config.py                  # Banking constants: PII floors, eval thresholds
+```
+
+---
+
+## Supported input formats
+
+| Format | Extension | Metadata | Lineage | Quality |
+|--------|-----------|----------|---------|---------|
+| CSV dataset | `.csv` | ✓ | — | ✓ |
+| JSON Schema | `.json` | ✓ | — | ✓ |
+| SQL DDL | `.sql` `.ddl` | ✓ | — | ✓ |
+| SQL SELECT | `.sql` | — | ✓ | — |
+
+---
+
+## Example outputs
+
+### Metadata Agent — single field
+
+```yaml
+- name: national_insurance
+  display_name: National Insurance Number
+  description: UK NI number uniquely identifying the individual for tax and social
+    security purposes. Format [A-Z]{2}[0-9]{6}[A-Z].
+  data_type: string
+  is_pii: true
+  pii_type: national_id
+  sensitivity_level: restricted
+  usage_guidance: Access restricted to KYC and Compliance teams. Never include in
+    analytics exports. Mask in non-production environments. Audit log all access.
+  tags: [pii, restricted, kyc, regulatory, hmrc]
+```
+
+### Lineage Agent — single field
+
+```json
+{
+  "target_field": "unrealised_pnl",
+  "source_fields": [
+    { "table": "positions", "column": "cost_basis" },
+    { "table": "market_data", "column": "price" }
+  ],
+  "transformation": "(market_data.price - positions.cost_basis) * positions.quantity",
+  "lineage_type": "derived",
+  "confidence": "HIGH",
+  "bcbs_note": "BCBS 239 P2: lineage traceable to two source tables. Requires daily reconciliation."
+}
+```
+
+### Data Quality Agent — single field
+
+```json
+{
+  "field_name": "credit_score",
+  "completeness_score": 94.5,
+  "issues": ["2 null values on a field used in credit decisioning"],
+  "expectations": [
+    { "expectation_type": "expect_column_values_to_not_be_null", "kwargs": {} },
+    { "expectation_type": "expect_column_values_to_be_between", "kwargs": { "min_value": 300, "max_value": 850 } }
+  ],
+  "quality_notes": "Null rate 0.6% — acceptable but should be investigated. Range 300–850 per standard credit scoring."
+}
 ```
 
 ---
 
 ## Design decisions
 
-**Agentic loop instead of forced single call.** The agent now runs a multi-turn loop (max 6 turns). On the first turn Claude calls `search_field_glossary` to check prior definitions, optionally calls `get_dataset_history` for landscape context, then calls `generate_dataset_metadata` with a fully informed response. `tool_choice: any` ensures a tool is always used, preventing open-ended text responses.
+**Markdown-driven agents.** System prompts live in `agents/*.md`, not in Python. Change the `.md` to change what Claude is told to do — no code change, no restart required. The Python class handles tool execution only.
 
-**Memory for cross-dataset consistency.** Without memory, the same field `account_number` might be classified RESTRICTED in one run and CONFIDENTIAL in another. The SQLite glossary gives Claude the prior classification as explicit context, making consistency measurable and automatic.
+**Agentic loop with tool selection.** `tool_choice: any` forces at least one tool per turn. Claude chooses which tools to call and in what order based on the system prompt instructions. The loop runs until the terminal tool (`generate_dataset_metadata`, `write_lineage_graph`, or `write_quality_report`) is called.
 
-**Why tool use instead of prompt-to-text?** `tool_choice` forces Claude to return valid JSON matching the Pydantic schema every time. No text parsing, no regex extraction from prose, no malformed output.
+**sqlglot for SQL lineage.** Pure Python, no database connection required, supports 20+ SQL dialects. Extracts column references and expression types (direct, derived, aggregated, constant) statically before Claude interprets the results.
 
-**Why guardrails before evals?** Guardrails fix known policy violations (e.g. a card number field classified CONFIDENTIAL instead of SECRET). Evals then score the already-corrected output. This separates enforcement from measurement — the policy is guaranteed met before scoring begins.
+**Memory for consistency.** Without memory, `account_number` might be RESTRICTED one run and CONFIDENTIAL the next. The field glossary gives Claude explicit prior context on every run.
 
-**Why prompt caching?** The system prompt encodes ~1,200 tokens of banking standards context (BCBS 239, GDPR rules, PII taxonomy). Caching it with `cache_control: ephemeral` cuts input token cost by ~90% across repeated runs.
+**Guardrails before evals.** Guardrails fix known policy violations. Evals score the corrected output. Policy compliance is guaranteed before quality measurement begins.
 
-**Why mask PII in the extractor?** The extractor runs before any API call. Column names that match PII heuristics trigger value masking so actual data never appears in the Claude prompt — reducing exposure even if an API call were intercepted or logged.
+**Prompt caching.** System prompts (~1,200 tokens) are cached with `cache_control: ephemeral`. ~90% input token saving on repeated runs.
 
-**Why read-only OAuth scopes?** The agent only needs to read files. `gmail.readonly` and `drive.readonly` are the minimum permissions. The agent cannot send emails, modify Drive files, or access any other Google service.
+**PII masking at extraction.** Suspected PII column values are masked before the first API call. Actual values never appear in the Claude prompt.
+
+---
+
+## Adding a new agent
+
+1. **Create `agents/<name>.md`** with YAML front matter and the system prompt in the body
+2. **Create `src/agents/tools/<name>_tools.py`** with tool schemas and Python implementations
+3. **Create `src/agents/<name>_agent.py`** — subclass `BaseAgent`, implement `tools`, `handle_tool_call()`, `run()`
+4. **Register** in `src/agents/__init__.py`
+5. **Add a command** to `run_agent.py`
 
 ---
 
 ## Banking standards encoded
 
-| Standard | What is checked |
-|----------|-----------------|
-| **BCBS 239** | Data lineage, reconciliation key identification, quality flags, source system traceability, version management |
-| **UK GDPR / GDPR** | PII classification, lawful basis, retention period, right to erasure, cross-border transfer restrictions, consent tracking |
-| **DAMA-DMBOK** | Data steward and owner fields, domain/sub-domain classification, data lifecycle metadata |
-| **ISO 8000** | Data quality indicator fields embedded in field-level metadata |
-| **FCA Handbook** | 7-year retention flag for regulated financial data |
-| **PSD2** | Payment data sensitivity floors (IBAN, sort code, account number) |
-
----
-
-## Extending the agent
-
-**Add a new input format** — implement `extract(filepath: str) -> DatasetProfile` in `src/extractors/` and register the extension in `src/extractors/__init__.py`.
-
-**Add a new eval dimension** — implement `evaluate(metadata, profile) -> QualityDimension` in `src/evals/` and register it in `eval_runner.py` with a weight. Weights must sum to 1.0.
-
-**Add a new guardrail** — implement `apply(...)` in `src/guardrails/` and add it to the pipeline in `src/guardrails/__init__.py`.
-
-**Add a new export format** — implement `export(metadata: DatasetMetadata) -> bytes` in `src/exporters/` and wire up a download button in `app.py`.
-
-**Add a new input connector** — implement `list_files()` and `download_file()` in `src/connectors/`, then add a tab in `app.py` that sets `st.session_state["_staged_bytes"]` and `st.session_state["_staged_name"]`.
-
-**Add a new agent** — subclass `BaseAgent` in `src/agents/`, implement `system_prompt`, `tools`, `handle_tool_call()`, and `run()`. See `lineage_agent.py` and `quality_agent.py` for documented stubs.
-
-**Connect to a data catalogue** — the YAML/JSON output follows a generic structure. Write a thin adapter that maps the fields to your catalogue's API (Collibra, Atlan, DataHub, Alation).
+| Standard | Where applied |
+|----------|--------------|
+| **BCBS 239** | Metadata: lineage, reconciliation keys, quality flags · Lineage: Principle 2 field-level traceability · Quality: Principles 3–6 accuracy/completeness/timeliness/adaptability |
+| **UK GDPR / GDPR** | Metadata: PII classification, lawful basis, retention, right to erasure, cross-border restrictions |
+| **DAMA-DMBOK** | Metadata: steward/owner fields, domain classification · Quality: 6 quality dimensions |
+| **ISO 8000** | Metadata: quality indicator fields embedded at field level |
+| **FCA Handbook** | Metadata: 7-year retention flag for regulated financial data |
+| **PSD2** | Metadata: payment data sensitivity floors (IBAN, sort code, account number) |
 
 ---
 
@@ -458,28 +580,22 @@ metadata-agent/
 
 | Component | Library | Purpose |
 |-----------|---------|---------|
-| AI agent | `anthropic` | Agentic loop with memory tools, structured output via tool use, prompt caching |
-| Web UI | `streamlit` | Upload, Gmail/Drive tabs, results tabs, download buttons |
-| Schema validation | `pydantic v2` | Type enforcement and model validation |
+| AI agents | `anthropic` | Agentic loops with tool use and prompt caching for all three agents |
+| SQL lineage | `sqlglot` | Dialect-agnostic SQL parsing and column-level lineage extraction |
+| Web UI | `streamlit` | Upload, Gmail/Drive input tabs, results tabs, download buttons |
+| Schema validation | `pydantic v2` | Output models for metadata, lineage, and quality reports |
 | Data profiling | `pandas` | CSV statistical profiling and type inference |
-| Agent memory | `sqlite3` (stdlib) | Field glossary, run history, regulation cache |
+| Agent memory | `sqlite3` (stdlib) | Field glossary, run history, regulation cache, processed sources |
 | Live regulations | `urllib.request` + `xml.etree` (stdlib) | RSS fetch from BIS, ICO, FCA, EBA |
 | Google connectors | `google-api-python-client`, `google-auth-oauthlib` | Gmail and Drive read-only access |
 | PDF export | `fpdf2` | Structured PDF with field tables, PII register, quality report |
 | Word export | `python-docx` | Editable .docx with colour-coded sensitivity cells |
 | YAML output | `pyyaml` | Human-readable metadata files |
-| CLI display | `rich` | Formatted terminal quality report |
+| CLI display | `rich` | Formatted terminal output for all agents |
 | Config | `python-dotenv` | API key and environment management |
 
 ---
 
 ## About
 
-Built by a Senior Product Owner with 19 years in banking data and AI, currently at Deutsche Bank CDO. This project demonstrates how generative AI can automate the most time-consuming part of data governance work — writing metadata that is actually useful to downstream data consumers, analysts, and compliance teams.
-
-The same agent pattern can be extended to:
-- Automated data lineage documentation from SQL query logs
-- Data contract generation from microservice APIs
-- Regulatory reporting field mapping (COREP, FINREP, AnaCredit)
-- Data quality rule generation from business constraints
-- DORA-compliant critical data element cataloguing
+Built by a Senior Product Owner with 19 years in banking data and AI, currently at Deutsche Bank CDO. This project demonstrates how generative AI can automate the most time-consuming parts of data governance — writing metadata, tracing lineage, and generating quality rules — at banking-grade standards.
