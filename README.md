@@ -4,6 +4,16 @@ An AI-powered, multi-agent data governance platform for global banking instituti
 
 All agents are driven by editable markdown files in `agents/`, maintain a persistent SQLite memory, fetch live regulatory updates from BIS/ICO/FCA/EBA, and can receive files from a local upload, Gmail attachment, or Google Drive.
 
+BIS: Bank for International Settlements
+ICO: Information Commissioner's Office
+FCA: Financial Conduct Authority
+EBA: European Banking AuthorityWhat They Do
+
+BIS: Serves as a bank for central banks and fosters global monetary stability.
+ICO: UK's independent body set up to uphold information rights and data privacy.
+FCA: Regulates financial services firms and financial markets in the UK.
+EBA: Regulates and supervises the banking sector across all European Union countries.
+
 Built as a portfolio project demonstrating the intersection of AI engineering and banking data governance.
 
 ---
