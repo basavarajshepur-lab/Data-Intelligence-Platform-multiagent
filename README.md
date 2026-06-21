@@ -610,4 +610,4 @@ metadata-agent/
 
 ## About
 
-Built by a Senior Product Owner with 19 years in banking data and AI, currently at Deutsche Bank CDO. This project demonstrates how generative AI can automate the most time-consuming parts of data governance — writing metadata, tracing lineage, and generating quality rules — at banking-grade standards.
+Built by a Senior AI Product Manager with 19 years in banking data and AI. This project demonstrates how generative AI can automate the most time-consuming parts of data governance — writing metadata, tracing lineage, and generating quality rules — at banking-grade standards.
