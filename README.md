@@ -143,6 +143,7 @@ unrealised_pnl        derived      MEDIUM      positions.cost_basis · market_da
 ### Data Quality Agent
 
 Profiles a dataset across all six DAMA-DMBOK quality dimensions and generates Great Expectations rules.
+DAMA-DMBOK (Data Management Association's Data Management Body of Knowledge), The framework is structurally organized around the DAMA Wheel, which positions Data Governance at the center, surrounded by 10 interconnected disciplines: one of them is Data Quality: Measuring, assessing, and improving the trustworthiness of data.
 
 ```bash
 # Quality assessment on any supported file
